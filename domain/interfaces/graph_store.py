@@ -12,3 +12,8 @@ class GraphStore(Protocol):
     def upsert_relationship(
         self, source: str, relation: str, target: str, scope: MemoryScope | None = None
     ) -> None: ...
+
+    def find_related(self, entity: str, scope: MemoryScope | None = None, limit: int = 5) -> list[str]:
+        """Return names of entities connected to `entity`, for surfacing
+        during recall (e.g. "related entities" alongside retrieved memories)."""
+        ...
