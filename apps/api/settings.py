@@ -43,6 +43,7 @@ class Settings:
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_timeout_seconds: float = 5.0  # fail fast when Neo4j is unreachable
+    neo4j_query_timeout_seconds: float = 2.0  # per-query cap so a busy graph can't stall recall
 
     # Document store — empty = local markdown directory
     openknowledge_url: str = ""
@@ -76,6 +77,7 @@ class Settings:
             neo4j_user=env("NEO4J_USER", cls.neo4j_user),
             neo4j_password=env("NEO4J_PASSWORD", ""),
             neo4j_timeout_seconds=float(env("NEO4J_TIMEOUT_SECONDS", 5.0)),
+            neo4j_query_timeout_seconds=float(env("NEO4J_QUERY_TIMEOUT_SECONDS", 2.0)),
             openknowledge_url=env("OPENKNOWLEDGE_URL", ""),
             sync_mode=env("AFTERMIND_SYNC_MODE", EAGER).strip().lower() or EAGER,
             sync_worker_enabled=_env_bool("AFTERMIND_SYNC_WORKER", True),

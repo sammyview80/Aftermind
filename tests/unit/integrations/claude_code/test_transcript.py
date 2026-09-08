@@ -78,3 +78,26 @@ def test_read_last_exchange_tolerates_malformed_json_lines(tmp_path):
     transcript.write_text("not json\n" + json.dumps({"type": "user", "message": {"role": "user", "content": "ok"}}))
 
     assert "User: ok" in read_last_exchange(str(transcript))
+
+
+def test_count_exchanges_counts_only_real_user_assistant_pairs(tmp_path):
+    from integrations.claude_code.transcript import count_exchanges
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"type": "system", "subtype": "init"},
+            {"type": "user", "message": {"role": "user", "content": "<system-reminder>injected</system-reminder>"}},
+            {"type": "user", "message": {"role": "user", "content": "hello"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+            {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash"}]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}},
+        ],
+    )
+
+    assert count_exchanges(str(transcript)) == 2
+    assert count_exchanges(None) == 0
+    assert count_exchanges(str(tmp_path / "missing.jsonl")) == 0

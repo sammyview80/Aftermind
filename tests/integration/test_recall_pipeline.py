@@ -42,6 +42,9 @@ class FakeKnowledgeStore:
         matches = [m for m in self._memories.values() if words & set(m.content.lower().split())]
         return matches[:limit]
 
+
+    def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        return []
     def get(self, memory_id: str) -> Optional[Memory]:
         return self._memories.get(memory_id)
 
@@ -62,6 +65,9 @@ class FakeGraphStore:
 
     def find_related(self, entity: str, scope=None, limit: int = 5) -> list[str]:
         return self._related.get(entity, [])[:limit]
+
+    def find_relationships(self, entity: str, scope=None, limit: int = 5) -> list[tuple[str, str, str]]:
+        return [(entity, "related_to", t) for t in self._related.get(entity, [])[:limit]]
 
 
 class RecallService:

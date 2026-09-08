@@ -39,7 +39,13 @@ class Neo4jClient:
         password: Optional[str] = None,
         driver=None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        query_timeout: Optional[float] = None,
     ) -> None:
+        # Server-side transaction timeout per query (seconds). Bounds a
+        # Cypher read that is queued behind graphiti's index/constraint
+        # builds or a heavy write, so recall stays inside a hook's budget
+        # instead of waiting on the graph. None = driver/server default.
+        self._query_timeout = query_timeout
         if driver is not None:
             self._driver = driver
         else:
@@ -51,8 +57,13 @@ class Neo4jClient:
             self._driver = GraphDatabase.driver(uri or DEFAULT_URI, auth=auth, **driver_config(timeout))
 
     def run(self, query: str, **params: Any) -> list:
+        statement: Any = query
+        if self._query_timeout is not None:
+            from neo4j import Query
+
+            statement = Query(query, timeout=self._query_timeout)
         with self._driver.session() as session:
-            return list(session.run(query, **params))
+            return list(session.run(statement, **params))
 
     def close(self) -> None:
         self._driver.close()

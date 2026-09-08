@@ -2,7 +2,7 @@ from contextlib import nullcontext
 from typing import Iterable, Optional
 
 from core.checkpoints.manager import CheckpointManager
-from core.checkpoints.summarizer import LLMCheckpointSummarizer
+from core.checkpoints.summarizer import CheckpointSummary, LLMCheckpointSummarizer
 from core.consolidation.consolidator import LLMConsolidator
 from core.consolidation.planner import ConsolidationPlanner
 from core.consolidation.triggers import (
@@ -63,6 +63,26 @@ _EXCLUDED_FROM_RECALL = frozenset({MemoryStatus.ARCHIVED, MemoryStatus.EXPIRED, 
 
 def _scope_key(scope: Optional[MemoryScope]) -> Optional[str]:
     return scope.key() if scope is not None else None
+
+
+def _dedupe(items: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(i.strip() for i in items if i and i.strip()))
+
+
+def _merge_checkpoint_summary(summary: CheckpointSummary, previous: Optional[Checkpoint]) -> CheckpointSummary:
+    if previous is None:
+        return summary
+    completed = _dedupe((*previous.completed, *summary.completed))
+    # Steps the new summary lists as completed are no longer "next".
+    carried_next = tuple(step for step in previous.next_steps if step not in completed)
+    next_steps = _dedupe(summary.next_steps) or carried_next
+    return CheckpointSummary(
+        goal=summary.goal.strip() or previous.goal,
+        completed=completed,
+        current=summary.current.strip() or previous.current,
+        blockers=_dedupe(summary.blockers),
+        next_steps=next_steps,
+    )
 
 
 class AftermindService:
@@ -483,16 +503,27 @@ class AftermindService:
             experience = Experience(scope=scope, input=text, output=text)
             with trace.span("summarize"):
                 summary = self._checkpoint_summarizer.summarize(
-                    experience, previous_goal=previous.goal if previous else ""
+                    experience,
+                    previous_goal=previous.goal if previous else "",
+                    previous_completed=previous.completed if previous else (),
+                    previous_next_steps=previous.next_steps if previous else (),
                 )
+
+            # Merge, don't replace: a trivial session must not erase the
+            # hand-off state a substantive earlier session recorded.
+            # Completed work accumulates; next steps are the new list when
+            # the summarizer produced one, else carried forward; a blank
+            # goal falls back to the previous goal.
+            merged = _merge_checkpoint_summary(summary, previous)
+            t.record(merged_from_previous=previous is not None)
 
             checkpoint = self._checkpoints.create(
                 scope=scope,
-                goal=summary.goal,
-                current=summary.current,
-                completed=summary.completed,
-                blockers=summary.blockers,
-                next_steps=summary.next_steps,
+                goal=merged.goal,
+                current=merged.current,
+                completed=merged.completed,
+                blockers=merged.blockers,
+                next_steps=merged.next_steps,
                 memory_ids=memory_ids,
                 reason=reason,
             )

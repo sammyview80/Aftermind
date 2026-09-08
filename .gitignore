@@ -9,3 +9,4 @@ __pycache__/
 *.db-shm
 *.egg-info/
 openknowledge_store/
+build/

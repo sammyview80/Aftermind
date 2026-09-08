@@ -75,7 +75,13 @@ def _build_graph_store(settings: Settings):
 
         timeout = settings.neo4j_timeout_seconds
         writer = GraphitiWriter(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password, timeout=timeout)
-        client = Neo4jClient(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password, timeout=timeout)
+        client = Neo4jClient(
+            settings.neo4j_uri,
+            settings.neo4j_user,
+            settings.neo4j_password,
+            timeout=timeout,
+            query_timeout=settings.neo4j_query_timeout_seconds,
+        )
         return GraphitiStore(writer, client)
     except ImportError as exc:
         _LOG.warning("GraphStore falling back to in-memory: %s", exc)

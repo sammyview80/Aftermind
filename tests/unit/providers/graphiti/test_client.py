@@ -61,3 +61,16 @@ def test_driver_config_bounds_every_neo4j_wait():
         "connection_acquisition_timeout": 3.0,
         "max_transaction_retry_time": 3.0,
     }
+
+
+def test_query_timeout_wraps_statement_in_a_neo4j_query():
+    from neo4j import Query
+
+    driver = FakeDriver()
+    Neo4jClient(driver=driver, query_timeout=2.0).run("MATCH (n) RETURN n", name="x")
+
+    statement, params = driver.calls[0]
+    assert isinstance(statement, Query)
+    assert statement.text == "MATCH (n) RETURN n"
+    assert statement.timeout == 2.0
+    assert params == {"name": "x"}

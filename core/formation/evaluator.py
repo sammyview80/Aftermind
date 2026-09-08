@@ -10,6 +10,34 @@ _TRANSIENT_MARKERS = ("today", "right now", "currently just", "for now", "at the
 
 DEFAULT_WORTH_REMEMBERING_THRESHOLD = 0.5
 
+# A question is a request for a fact, not a fact. Stored as memory it
+# comes back as "Current facts: what database does Aftermind use" and
+# even reaches the graph as `Aftermind -[USES_DATABASE]-> unknown`.
+_INTERROGATIVE_STARTS = (
+    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+    "is", "are", "am", "was", "were", "do", "does", "did", "can", "could",
+    "should", "would", "will", "shall", "may", "might", "have", "has", "had",
+    "isn't", "aren't", "don't", "doesn't", "didn't", "can't", "couldn't",
+    "shouldn't", "wouldn't", "won't",
+)
+_MIN_STATEMENT_WORDS = 3
+
+
+def is_interrogative(content: str) -> bool:
+    text = content.strip()
+    if not text:
+        return False
+    if text.endswith("?"):
+        return True
+    first = text.split(None, 1)[0].lower().strip(",.:;")
+    return first in _INTERROGATIVE_STARTS
+
+
+def is_conversational_filler(content: str) -> bool:
+    """Too short to be a specific, durable statement ("ok", "i reloaded",
+    "thanks that works")."""
+    return len(content.split()) < _MIN_STATEMENT_WORDS
+
 
 class MemoryEvaluator:
     """Scores a Candidate on the dimensions that matter for durable
@@ -54,6 +82,8 @@ class MemoryEvaluator:
         return sum(dimensions) / len(dimensions)
 
     def is_worth_remembering(self, candidate: Candidate) -> bool:
+        if is_interrogative(candidate.content) or is_conversational_filler(candidate.content):
+            return False
         return self.overall_score(candidate) >= self.threshold
 
 
@@ -105,4 +135,8 @@ class LLMMemoryEvaluator:
         return MemoryEvaluator.overall_score(self, candidate)
 
     def is_worth_remembering(self, candidate: Candidate) -> bool:
+        # Deterministic policy applies before the model's scores: a
+        # question is never a fact, however confidently it was scored.
+        if is_interrogative(candidate.content) or is_conversational_filler(candidate.content):
+            return False
         return self.overall_score(candidate) >= self.threshold

@@ -43,10 +43,11 @@ class Retriever:
         scope = plan.scope.stable() if plan.scope else None
 
         by_id: dict[str, Memory] = {}
-        for term in plan.search_terms:
-            for memory in self._knowledge_store.search(term, scope=scope, limit=plan.limit):
-                if not plan.memory_types or memory.memory_type in plan.memory_types:
-                    by_id.setdefault(memory.memory_id, memory)
+        with trace.span("knowledge.search"):
+            for term in plan.search_terms:
+                for memory in self._knowledge_store.search(term, scope=scope, limit=plan.limit):
+                    if not plan.memory_types or memory.memory_type in plan.memory_types:
+                        by_id.setdefault(memory.memory_id, memory)
 
         entities: dict[str, None] = {}
         relationships: dict[tuple[str, str, str], None] = {}
@@ -54,18 +55,15 @@ class Retriever:
             for seed in plan.entity_seeds:
                 for related in self._graph_store.find_related(seed, scope=scope, limit=plan.limit):
                     entities.setdefault(related, None)
-                find_relationships = getattr(self._graph_store, "find_relationships", None)
-                if find_relationships is not None:
-                    for triple in find_relationships(seed, scope=scope, limit=plan.limit):
-                        relationships.setdefault(tuple(triple), None)
+                for triple in self._graph_store.find_relationships(seed, scope=scope, limit=plan.limit):
+                    relationships.setdefault(tuple(triple), None)
         if span is not None and span.status == trace.FAILED:
             trace.record(graph_search=trace.FAILED)
 
         historical: dict[str, Memory] = {}
-        history = getattr(self._knowledge_store, "history", None)
-        if history is not None:
+        with trace.span("knowledge.history"):
             for term in plan.search_terms:
-                for memory in history(term, scope=scope, limit=plan.limit):
+                for memory in self._knowledge_store.history(term, scope=scope, limit=plan.limit):
                     if memory.memory_id not in by_id:
                         historical.setdefault(memory.memory_id, memory)
 

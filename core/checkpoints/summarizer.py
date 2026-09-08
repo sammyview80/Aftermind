@@ -62,6 +62,11 @@ class CheckpointSummarizer:
 
 
 _SUMMARIZER_PROMPT_TEMPLATE = """PREVIOUS CHECKPOINT: {previous_goal}
+previously completed: {previous_completed}
+previously planned next steps: {previous_next_steps}
+(Keep previously completed work in "completed" and keep any still-open next
+steps unless this experience shows them done or abandoned. Only reflect what
+changed; if nothing of substance happened, return the previous state.)
 
 EXPERIENCE:
 input: {input}
@@ -83,17 +88,31 @@ class LLMCheckpointSummarizer:
         self._llm = llm_provider
         self._system_prompt = system_prompt
 
-    def build_prompt(self, experience: Experience, previous_goal: str = "") -> str:
+    def build_prompt(
+        self,
+        experience: Experience,
+        previous_goal: str = "",
+        previous_completed: tuple[str, ...] = (),
+        previous_next_steps: tuple[str, ...] = (),
+    ) -> str:
         task = _SUMMARIZER_PROMPT_TEMPLATE.format(
             previous_goal=previous_goal or "None.",
+            previous_completed=list(previous_completed) or "None.",
+            previous_next_steps=list(previous_next_steps) or "None.",
             input=experience.input,
             output=experience.output,
             events=[e.event_type.value for e in experience.events],
         )
         return f"{self._system_prompt}\n\n{task}" if self._system_prompt else task
 
-    def summarize(self, experience: Experience, previous_goal: str = "") -> CheckpointSummary:
-        raw = self._llm.complete(self.build_prompt(experience, previous_goal))
+    def summarize(
+        self,
+        experience: Experience,
+        previous_goal: str = "",
+        previous_completed: tuple[str, ...] = (),
+        previous_next_steps: tuple[str, ...] = (),
+    ) -> CheckpointSummary:
+        raw = self._llm.complete(self.build_prompt(experience, previous_goal, previous_completed, previous_next_steps))
         parsed = parse_json_response(raw)
 
         return CheckpointSummary(

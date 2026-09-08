@@ -25,6 +25,42 @@ def _message_text(message: dict) -> str:
     return ""
 
 
+def count_exchanges(transcript_path: Optional[str], max_lines: int = 2000) -> int:
+    """How many real user/assistant exchanges the transcript holds — a
+    user message with prose followed (at some point) by an assistant text
+    reply. Hook-injected context, tool results and system lines don't
+    count. Used to skip checkpointing a session that never did anything."""
+    if not transcript_path:
+        return 0
+    path = Path(transcript_path)
+    if not path.exists():
+        return 0
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return 0
+
+    exchanges = 0
+    awaiting_reply = False
+    for line in lines[-max_lines:]:
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        text = _message_text(message)
+        if not text or text.lstrip().startswith("<"):
+            continue  # tool results / injected system context, not a turn
+        if entry.get("type") == "user":
+            awaiting_reply = True
+        elif entry.get("type") == "assistant" and awaiting_reply:
+            exchanges += 1
+            awaiting_reply = False
+    return exchanges
+
+
 def read_last_exchange(transcript_path: Optional[str], max_lines: int = 200) -> str:
     """The most recent user message and the most recent assistant text
     reply from the transcript, formatted as "User: ...\\nAssistant: ...".

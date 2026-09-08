@@ -111,6 +111,10 @@ def test_on_session_end_checkpoints_from_transcript(monkeypatch, tmp_path):
     transcript.write_text(
         "\n".join(
             [
+                json.dumps({"type": "user", "message": {"role": "user", "content": "Let's start on X."}}),
+                json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "On it."}]}}
+                ),
                 json.dumps({"type": "user", "message": {"role": "user", "content": "We finished X."}}),
                 json.dumps(
                     {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Noted."}]}}
@@ -142,3 +146,42 @@ def test_on_session_end_is_a_noop_with_no_transcript(monkeypatch):
     on_session_end({"transcript_path": None})
 
     assert calls == []
+
+
+def test_session_end_skips_checkpoint_for_a_trivial_session(tmp_path, monkeypatch):
+    """One prompt, one reply = nothing to hand off; the previous
+    checkpoint must not be overwritten with 'placeholder conversation'."""
+    import json as _json
+
+    from integrations.claude_code import checkpoint_adapter
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        "\n".join(
+            _json.dumps(e)
+            for e in [
+                {"type": "user", "message": {"role": "user", "content": "hi"}},
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]}},
+            ]
+        )
+    )
+    posted = []
+    monkeypatch.setattr(checkpoint_adapter.httpx, "post", lambda *a, **k: posted.append((a, k)))
+
+    checkpoint_adapter.checkpoint_from_transcript({"transcript_path": str(transcript), "cwd": str(tmp_path)}, "session_end")
+    assert posted == []
+
+    transcript.write_text(
+        transcript.read_text()
+        + "\n"
+        + "\n".join(
+            _json.dumps(e)
+            for e in [
+                {"type": "user", "message": {"role": "user", "content": "now wire the hooks"}},
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "wired"}]}},
+            ]
+        )
+    )
+    checkpoint_adapter.checkpoint_from_transcript({"transcript_path": str(transcript), "cwd": str(tmp_path)}, "session_end")
+    assert len(posted) == 1
+    assert posted[0][1]["json"]["reason"] == "session_end"

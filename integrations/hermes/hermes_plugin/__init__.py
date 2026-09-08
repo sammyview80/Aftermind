@@ -15,8 +15,10 @@ share a scope just because both are opened under the same Hermes profile.
 Config (env vars, all optional — explicit values always win over
 derived ones):
     AFTERMIND_URL              REST base URL (default http://localhost:8000)
-    AFTERMIND_SCOPE_TENANT     scope tenant_id (default "hermes")
-    AFTERMIND_SCOPE_AGENT      scope agent_id (default "hermes")
+    AFTERMIND_SCOPE_TENANT     scope tenant_id (default "default" — shared
+                                with other framework adapters; see _derive_scope)
+    AFTERMIND_SCOPE_AGENT      scope agent_id (unset by default; opt-in
+                                isolation of one agent within a framework)
     AFTERMIND_SCOPE_PROJECT    overrides the derived project_id
     AFTERMIND_SCOPE_REPOSITORY overrides the derived repository_id
     AFTERMIND_RECALL_TIMEOUT   seconds (default 3)

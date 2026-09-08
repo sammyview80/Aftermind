@@ -9,10 +9,15 @@ import os
 import httpx
 
 from integrations.claude_code.scope_mapper import derive_scope
-from integrations.claude_code.transcript import read_last_exchange
+from integrations.claude_code.transcript import count_exchanges, read_last_exchange
 
 DEFAULT_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT = 15.0
+# A session with fewer real exchanges than this has nothing to hand off;
+# checkpointing it would only overwrite a good earlier checkpoint with
+# "placeholder conversation" (seen live: v1 replaced by three trivial
+# one-prompt headless sessions).
+DEFAULT_MIN_EXCHANGES = 2
 
 
 def _base_url() -> str:
@@ -23,7 +28,12 @@ def checkpoint_from_transcript(payload: dict, reason: str) -> None:
     """Best-effort: swallows all errors, same contract as the Hermes
     adapter's _checkpoint_from_pending — an unreachable Aftermind server
     or an unparsable transcript must never break a Claude Code hook."""
-    text = read_last_exchange(payload.get("transcript_path"))
+    transcript_path = payload.get("transcript_path")
+    min_exchanges = int(os.environ.get("AFTERMIND_CHECKPOINT_MIN_EXCHANGES", DEFAULT_MIN_EXCHANGES))
+    if count_exchanges(transcript_path) < min_exchanges:
+        return
+
+    text = read_last_exchange(transcript_path)
     if not text:
         return
 
