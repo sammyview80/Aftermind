@@ -52,3 +52,24 @@ def test_save_updates_existing_memory_on_conflict(tmp_path):
     store.save(replace(memory, content="v2", version=2))
 
     assert store.get(memory.memory_id).content == "v2"
+
+
+def test_list_all_excludes_superseded_and_scopes(tmp_path):
+    store = SqliteKnowledgeStore(SqliteClient(str(tmp_path / "test.db")))
+    scope_a = MemoryScope.of(tenant_id="a")
+    scope_b = MemoryScope.of(tenant_id="b")
+    live = store.save(Memory(scope=scope_a, content="Team uses RabbitMQ"))
+    store.save(Memory(scope=scope_a, content="Team uses Redis", superseded_by=live.memory_id))
+    store.save(Memory(scope=scope_b, content="unrelated"))
+
+    results = store.list_all(scope=scope_a)
+
+    assert [m.memory_id for m in results] == [live.memory_id]
+
+
+def test_list_all_respects_limit(tmp_path):
+    store = SqliteKnowledgeStore(SqliteClient(str(tmp_path / "test.db")))
+    for i in range(5):
+        store.save(Memory(content=f"fact {i}"))
+
+    assert len(store.list_all(limit=2)) == 2

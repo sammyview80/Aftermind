@@ -17,3 +17,10 @@ class KnowledgeStore(Protocol):
     def save(self, memory: Memory) -> Memory:
         """Insert or overwrite a memory by id, returning the stored value."""
         ...
+
+    def list_all(self, scope: Optional[MemoryScope] = None, limit: int = 1000) -> list[Memory]:
+        """All live (non-superseded) memories in scope — unlike search(),
+        not ranked against a query. Used by consolidation, which needs
+        every candidate in scope to cluster, not just the top-k for one
+        query."""
+        ...

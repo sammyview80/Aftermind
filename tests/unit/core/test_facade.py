@@ -12,25 +12,48 @@ from providers.inmemory.store import (
 
 
 class ScriptedLLM:
-    def __init__(self, action: str = "create", target_memory_id=None) -> None:
+    def __init__(self, action: str = "create", target_memory_id=None, consolidation_response=None) -> None:
         self.action = action
         self.target_memory_id = target_memory_id
+        self.consolidation_response = consolidation_response
 
     def complete(self, prompt: str) -> str:
         if "EXISTING MEMORIES:" in prompt:
             return json.dumps(
                 {"action": self.action, "target_memory_id": self.target_memory_id, "confidence": 0.9, "reasoning": "x"}
             )
+        if "Graph Triple Extractor" in prompt:
+            return "[]"  # graph-extraction correctness is triple_extractor's own tests' job
+        if "MEMORIES TO CONSOLIDATE" in prompt:
+            if self.consolidation_response is None:
+                raise AssertionError("unexpected consolidation call")
+            return self.consolidation_response
         raise AssertionError(f"unexpected prompt: {prompt[:60]!r}")
 
 
-def _service(llm) -> AftermindService:
+class FakeDocumentStore:
+    def __init__(self) -> None:
+        self._docs = {}
+
+    def get(self, slug, scope=None):
+        return self._docs.get(slug)
+
+    def save(self, document):
+        self._docs[document.slug] = document
+        return document
+
+    def search(self, query, scope=None, limit=5):
+        return []
+
+
+def _service(llm, document_store=None) -> AftermindService:
     return AftermindService(
         knowledge_store=InMemoryKnowledgeStore(),
         graph_store=InMemoryGraphStore(),
         checkpoint_store=InMemoryCheckpointStore(),
         lifecycle_store=InMemoryLifecycleStore(),
         llm_provider=llm,
+        document_store=document_store,
     )
 
 
@@ -112,3 +135,47 @@ def test_observe_syncs_entities_and_relationships_to_the_graph_store():
     service.observe(_experience("Aftermind uses PostgreSQL", scope))
 
     assert service.graph_store.find_related("Aftermind", scope=scope) == ["PostgreSQL"]
+
+
+def test_consolidate_raises_without_a_document_store():
+    service = _service(ScriptedLLM(action="create"))
+    try:
+        service.consolidate()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "DocumentStore" in str(exc)
+
+
+def test_consolidate_clusters_related_memories_and_writes_to_document_store():
+    scope = MemoryScope.of(tenant_id="t1")
+    consolidation_response = json.dumps(
+        {
+            "content": "Client prefers premium dark visual styles, especially black and gold.",
+            "confidence": 0.9,
+            "reasoning": "Consistent pattern across memories.",
+        }
+    )
+    document_store = FakeDocumentStore()
+    service = _service(ScriptedLLM(action="create", consolidation_response=consolidation_response), document_store)
+
+    for text in ["Client rejected bright blue", "Client prefers dark layouts", "Client approved black and gold"]:
+        assert service.observe(_experience(text, scope)) is not None
+
+    results = service.consolidate(scope=scope, slug="client-prefs", title="Client Preferences", min_group_size=3)
+
+    assert len(results) == 1
+    assert results[0].accepted is True
+    assert results[0].document_slug == "client-prefs"
+    document = document_store.get("client-prefs")
+    assert "black and gold" in document.to_markdown()
+    assert len(document.source_memory_ids) == 3
+
+
+def test_consolidate_below_threshold_produces_no_results():
+    scope = MemoryScope.of(tenant_id="t1")
+    document_store = FakeDocumentStore()
+    service = _service(ScriptedLLM(action="create"), document_store)
+
+    service.observe(_experience("Client prefers dark layouts", scope))
+
+    assert service.consolidate(scope=scope, min_group_size=3) == []

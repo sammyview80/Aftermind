@@ -64,3 +64,55 @@ def test_memory_checkpoint_round_trips_through_facade():
 
     assert result["goal"] == "Build login flow"
     assert result["version"] == 1
+
+
+class FakeDocumentStore:
+    def __init__(self) -> None:
+        self._docs = {}
+
+    def get(self, slug, scope=None):
+        return self._docs.get(slug)
+
+    def save(self, document):
+        self._docs[document.slug] = document
+        return document
+
+    def search(self, query, scope=None, limit=5):
+        return []
+
+
+class RoutingScriptedLLM:
+    def complete(self, prompt: str) -> str:
+        if "MEMORIES TO CONSOLIDATE" in prompt:
+            return json.dumps(
+                {
+                    "content": "Client prefers premium dark visual styles, especially black and gold.",
+                    "confidence": 0.9,
+                    "reasoning": "Consistent pattern.",
+                }
+            )
+        if "EXISTING MEMORIES:" in prompt:
+            return json.dumps({"action": "create", "target_memory_id": None, "confidence": 0.9, "reasoning": "x"})
+        return "[]"  # graph triple extraction — not under test here
+
+
+def test_memory_consolidate_writes_to_document_store():
+    document_store = FakeDocumentStore()
+    service = AftermindService(
+        knowledge_store=InMemoryKnowledgeStore(),
+        graph_store=InMemoryGraphStore(),
+        checkpoint_store=InMemoryCheckpointStore(),
+        lifecycle_store=InMemoryLifecycleStore(),
+        llm_provider=RoutingScriptedLLM(),
+        document_store=document_store,
+    )
+    scope = {"tenant_id": "t1"}
+    for text in ["Client rejected bright blue", "Client prefers dark layouts", "Client approved black and gold"]:
+        tools.memory_observe(service, scope=scope, output=text)
+
+    result = tools.memory_consolidate(service, scope=scope, slug="client-prefs", min_group_size=3)
+
+    assert len(result["consolidated"]) == 1
+    assert result["consolidated"][0]["accepted"] is True
+    assert result["consolidated"][0]["document_slug"] == "client-prefs"
+    assert len(result["consolidated"][0]["source_memory_ids"]) == 3

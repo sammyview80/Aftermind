@@ -68,6 +68,14 @@ class SqliteKnowledgeStore:
             row = conn.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,)).fetchone()
         return _row_to_memory(row) if row else None
 
+    def list_all(self, scope: Optional[MemoryScope] = None, limit: int = 1000) -> list[Memory]:
+        with self._client.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE scope_key = ? AND superseded_by IS NULL LIMIT ?",
+                (scope_key(scope), limit),
+            ).fetchall()
+        return [_row_to_memory(row) for row in rows]
+
     def save(self, memory: Memory) -> Memory:
         with self._client.connect() as conn:
             conn.execute(

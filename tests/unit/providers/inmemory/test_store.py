@@ -25,6 +25,27 @@ def test_knowledge_store_get_and_save_round_trip():
     assert store.get("nonexistent") is None
 
 
+def test_knowledge_store_list_all_excludes_superseded_and_scopes():
+    store = InMemoryKnowledgeStore()
+    scope_a = MemoryScope.of(tenant_id="a")
+    scope_b = MemoryScope.of(tenant_id="b")
+    live = store.save(Memory(scope=scope_a, content="Team uses RabbitMQ"))
+    store.save(Memory(scope=scope_a, content="Team uses Redis", superseded_by=live.memory_id))
+    store.save(Memory(scope=scope_b, content="unrelated"))
+
+    results = store.list_all(scope=scope_a)
+
+    assert [m.memory_id for m in results] == [live.memory_id]
+
+
+def test_knowledge_store_list_all_respects_limit():
+    store = InMemoryKnowledgeStore()
+    for i in range(5):
+        store.save(Memory(content=f"fact {i}"))
+
+    assert len(store.list_all(limit=2)) == 2
+
+
 def test_graph_store_find_related_scoped():
     store = InMemoryGraphStore()
     scope_a = MemoryScope.of(tenant_id="a")

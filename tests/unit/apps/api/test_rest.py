@@ -83,3 +83,62 @@ def test_observe_trivial_content_is_not_created():
     response = client.post("/observe", json={"scope": {"levels": {"tenant_id": "t3"}}, "output": "okay thanks"})
     assert response.status_code == 200
     assert response.json()["created"] is False
+
+
+class FakeDocumentStore:
+    def __init__(self) -> None:
+        self._docs = {}
+
+    def get(self, slug, scope=None):
+        return self._docs.get(slug)
+
+    def save(self, document):
+        self._docs[document.slug] = document
+        return document
+
+    def search(self, query, scope=None, limit=5):
+        return []
+
+
+class RoutingScriptedLLM:
+    def complete(self, prompt: str) -> str:
+        if "MEMORIES TO CONSOLIDATE" in prompt:
+            return json.dumps(
+                {
+                    "content": "Client prefers premium dark visual styles, especially black and gold.",
+                    "confidence": 0.9,
+                    "reasoning": "Consistent pattern.",
+                }
+            )
+        if "EXISTING MEMORIES:" in prompt:
+            return json.dumps({"action": "create", "target_memory_id": None, "confidence": 0.9, "reasoning": "x"})
+        return "[]"
+
+
+def test_consolidate_writes_to_document_store():
+    document_store = FakeDocumentStore()
+    consolidation_service = AftermindService(
+        knowledge_store=InMemoryKnowledgeStore(),
+        graph_store=InMemoryGraphStore(),
+        checkpoint_store=InMemoryCheckpointStore(),
+        lifecycle_store=InMemoryLifecycleStore(),
+        llm_provider=RoutingScriptedLLM(),
+        document_store=document_store,
+    )
+    original_override = app.dependency_overrides[get_service]
+    app.dependency_overrides[get_service] = lambda: consolidation_service
+    try:
+        scope = {"tenant_id": "consolidate-rest"}
+        for text in ["Client rejected bright blue", "Client prefers dark layouts", "Client approved black and gold"]:
+            client.post("/observe", json={"scope": {"levels": scope}, "output": text})
+
+        response = client.post(
+            "/consolidate", json={"scope": {"levels": scope}, "slug": "client-prefs", "min_group_size": 3}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["consolidated"]) == 1
+        assert body["consolidated"][0]["accepted"] is True
+        assert body["consolidated"][0]["document_slug"] == "client-prefs"
+    finally:
+        app.dependency_overrides[get_service] = original_override

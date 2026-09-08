@@ -33,8 +33,11 @@ class Triple:
     target: str
 
 
-def _normalize_relation(text: str) -> str:
+def normalize_relation(text: str) -> str:
     return re.sub(r"\s+", "_", text.strip().upper())
+
+
+_normalize_relation = normalize_relation  # internal alias, kept for callers within this module
 
 
 def extract_triples(text: str) -> list[Triple]:

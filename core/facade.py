@@ -1,6 +1,10 @@
 from typing import Iterable, Optional
 
 from core.checkpoints.manager import CheckpointManager
+from core.consolidation.consolidator import LLMConsolidator
+from core.consolidation.planner import ConsolidationPlanner
+from core.consolidation.triggers import DEFAULT_MEMORY_COUNT_THRESHOLD, ConsolidationTrigger
+from core.consolidation.validator import ConsolidationValidator
 from core.formation.candidate_extractor import CandidateExtractor
 from core.formation.evaluator import MemoryEvaluator
 from core.lifecycle.manager import LifecycleManager
@@ -13,25 +17,30 @@ from core.reconciliation.reconciler import Reconciler
 from core.reconciliation.validator import Validator
 from domain.interfaces.checkpoint_store import CheckpointStore
 from domain.interfaces.decision_store import DecisionStore
+from domain.interfaces.document_store import DocumentStore
 from domain.interfaces.episode_store import EpisodeStore
 from domain.interfaces.graph_store import GraphStore
 from domain.interfaces.knowledge_store import KnowledgeStore
 from domain.interfaces.lifecycle_store import LifecycleStore
 from domain.interfaces.llm_provider import LLMProvider
 from domain.models.checkpoint import Checkpoint
+from domain.models.consolidation_result import ConsolidationResult
 from domain.models.experience import Experience
 from domain.models.memory import Memory
 from domain.models.recall_query import RecallQuery
 from domain.models.recall_result import RecallResult
 from domain.models.scope import MemoryScope
 
-# triples_from/sync_to_graph parse "<source> <relation verb> <target>"
-# out of a Memory's content/relationships and write it via whatever
-# GraphStore is wired in — pure logic against the GraphStore Protocol,
-# no dependency on graphiti-core/Neo4j specifically, despite living
-# under providers/graphiti/ (that's the module's original home, not a
-# layering statement).
-from providers.graphiti.mapper import sync_to_graph
+# sync_to_graph extracts (source, relation, target) triples from a
+# Memory and writes them via whatever GraphStore is wired in — pure
+# logic against the GraphStore Protocol, no dependency on graphiti-
+# core/Neo4j specifically, despite living under providers/graphiti/
+# (that's the module's original home, not a layering statement). A
+# cheap regex handles simple atomic sentences; compound/merged content
+# goes through LLMTripleExtractor instead of stretching the regex to
+# cover shapes it can't safely parse (see providers/graphiti/validation.py).
+from providers.graphiti.triple_extractor import LLMTripleExtractor, sync_to_graph
+from providers.llm.base import load_prompt
 
 
 class AftermindService:
@@ -51,17 +60,20 @@ class AftermindService:
         llm_provider: LLMProvider,
         episode_store: Optional[EpisodeStore] = None,
         decision_store: Optional[DecisionStore] = None,
+        document_store: Optional[DocumentStore] = None,
     ) -> None:
         self.knowledge_store = knowledge_store
         self.graph_store = graph_store
         self._episode_store = episode_store
         self._decision_store = decision_store
+        self._document_store = document_store
 
         self._extractor = CandidateExtractor()
         self._evaluator = MemoryEvaluator()
         self._evidence_retriever = EvidenceRetriever(knowledge_store)
         self._reconciler = Reconciler(llm_provider)
         self._validator = Validator()
+        self._triple_extractor = LLMTripleExtractor(llm_provider, system_prompt=load_prompt("triple_extractor"))
 
         self._recall_planner = RecallPlanner()
         self._recall_retriever = Retriever(knowledge_store, graph_store)
@@ -70,6 +82,9 @@ class AftermindService:
 
         self._checkpoints = CheckpointManager(checkpoint_store)
         self._lifecycle = LifecycleManager(lifecycle_store)
+
+        self._consolidator = LLMConsolidator(llm_provider, system_prompt=load_prompt("consolidator"))
+        self._consolidation_validator = ConsolidationValidator()
 
     def observe(self, experience: Experience) -> Optional[Memory]:
         """Learn from one experience: extract -> evaluate -> retrieve
@@ -105,7 +120,7 @@ class AftermindService:
                 if refreshed is not None and refreshed.superseded_by:
                     self._lifecycle.archive_superseded(refreshed)
             # StoredMemory -> entity/relationship extraction -> GraphStore.
-            sync_to_graph(memory, self.graph_store)
+            sync_to_graph(memory, self.graph_store, llm_extractor=self._triple_extractor)
 
         self._checkpoints.checkpoint_experience(experience, memory_ids=[memory.memory_id] if memory else [])
         return memory
@@ -163,3 +178,34 @@ class AftermindService:
         """Direct memory search, without the full recall pipeline
         (no checkpoint, no ranking, no context compression)."""
         return self.knowledge_store.search(query, scope=scope.stable() if scope else None, limit=limit)
+
+    def consolidate(
+        self,
+        scope: Optional[MemoryScope] = None,
+        slug: str = "consolidated-knowledge",
+        title: str = "Consolidated Knowledge",
+        min_group_size: int = DEFAULT_MEMORY_COUNT_THRESHOLD,
+        trigger: ConsolidationTrigger = ConsolidationTrigger.MANUAL,
+    ) -> list[ConsolidationResult]:
+        """Pull every live memory in scope -> cluster related ones ->
+        synthesize each cluster into one durable statement -> validate
+        -> write into OpenKnowledge. Source memories are never deleted
+        or rewritten — only linked to via source_memory_ids. Raises if
+        no DocumentStore (OpenKnowledge) was configured, since there's
+        nowhere to write the result."""
+        if self._document_store is None:
+            raise ValueError("consolidate() requires a DocumentStore (OpenKnowledge) to be configured")
+
+        stable_scope = scope.stable() if scope else None
+        memories = self.knowledge_store.list_all(scope=stable_scope)
+
+        planner = ConsolidationPlanner(min_group_size=min_group_size)
+        plans = planner.plan(memories, trigger, scope=stable_scope)
+
+        results = []
+        for plan in plans:
+            candidate = self._consolidator.consolidate(plan)
+            result = self._consolidation_validator.validate(candidate)
+            result = self._consolidator.apply(candidate, result, self._document_store, slug=slug, title=title)
+            results.append(result)
+        return results

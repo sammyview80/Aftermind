@@ -58,6 +58,25 @@ def _build_graph_store():
 
 
 @lru_cache(maxsize=1)
+def get_document_store():
+    """Phase 3 durable backend: OpenKnowledge for consolidated, human-
+    readable knowledge (the Consolidation Engine's output — not every
+    StoredMemory). OPENKNOWLEDGE_URL points at a running `ok start` / OK
+    Desktop server; unset falls back to a local markdown directory."""
+    from providers.openknowledge.store import OpenKnowledgeStore
+
+    openknowledge_url = os.environ.get("OPENKNOWLEDGE_URL")
+    if openknowledge_url:
+        from providers.openknowledge.remote_client import RemoteOpenKnowledgeClient
+
+        return OpenKnowledgeStore(RemoteOpenKnowledgeClient(openknowledge_url))
+
+    from providers.openknowledge.client import LocalMarkdownClient
+
+    return OpenKnowledgeStore(LocalMarkdownClient())
+
+
+@lru_cache(maxsize=1)
 def get_service() -> AftermindService:
     """The process-wide AftermindService singleton, built once on first
     use.
@@ -67,6 +86,8 @@ def get_service() -> AftermindService:
     (default ./aftermind.db).
     Phase 2 durable backend: Graphiti + Neo4j for entities/relationships,
     configured via NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD.
+    Phase 3 durable backend: OpenKnowledge for consolidated knowledge,
+    configured via OPENKNOWLEDGE_URL (see get_document_store()).
     """
     db_path = os.environ.get("DATABASE_PATH", DEFAULT_DB_PATH)
     client = SqliteClient(db_path)
@@ -79,4 +100,5 @@ def get_service() -> AftermindService:
         llm_provider=_LazyLLMProvider(),
         episode_store=SqliteEpisodeStore(client),
         decision_store=SqliteDecisionStore(client),
+        document_store=get_document_store(),
     )

@@ -83,3 +83,28 @@ def memory_search(
     """Direct memory search, no checkpoint or context compression."""
     memories = service.search(query, scope=_scope(scope), limit=limit)
     return {"memories": [_summarize_memory(m) for m in memories]}
+
+
+def memory_consolidate(
+    service: AftermindService,
+    scope: Optional[dict[str, str]] = None,
+    slug: str = "consolidated-knowledge",
+    title: str = "Consolidated Knowledge",
+    min_group_size: int = 3,
+) -> dict[str, Any]:
+    """Cluster related memories in scope and write a durable, human-
+    readable summary of each cluster into OpenKnowledge. Source
+    memories are never deleted — only linked to via provenance."""
+    results = service.consolidate(scope=_scope(scope), slug=slug, title=title, min_group_size=min_group_size)
+    return {
+        "consolidated": [
+            {
+                "accepted": r.accepted,
+                "document_id": r.document_id,
+                "document_slug": r.document_slug,
+                "source_memory_ids": list(r.source_memory_ids),
+                "reasoning": r.reasoning,
+            }
+            for r in results
+        ]
+    }

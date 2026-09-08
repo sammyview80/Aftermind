@@ -24,7 +24,7 @@ def _import_server_class():
 
 def build_server(service: AftermindService):
     """Build the Aftermind MCP server, registering memory_observe/
-    memory_recall/memory_checkpoint/memory_search."""
+    memory_recall/memory_checkpoint/memory_search/memory_consolidate."""
     server_class = _import_server_class()
     server = server_class("aftermind")
 
@@ -58,6 +58,20 @@ def build_server(service: AftermindService):
     def memory_search(scope: dict[str, str] | None = None, query: str = "", limit: int = 5) -> dict:
         """Direct memory search, no checkpoint or context compression."""
         return tools.memory_search(service, scope=scope, query=query, limit=limit)
+
+    @server.tool()
+    def memory_consolidate(
+        scope: dict[str, str] | None = None,
+        slug: str = "consolidated-knowledge",
+        title: str = "Consolidated Knowledge",
+        min_group_size: int = 3,
+    ) -> dict:
+        """Cluster related memories in scope and write a durable summary
+        of each cluster into OpenKnowledge. Source memories are never
+        deleted — only linked to via provenance."""
+        return tools.memory_consolidate(
+            service, scope=scope, slug=slug, title=title, min_group_size=min_group_size
+        )
 
     return server
 

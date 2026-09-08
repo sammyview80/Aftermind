@@ -46,6 +46,12 @@ class InMemoryKnowledgeStore:
         self._memories[memory.memory_id] = memory
         return memory
 
+    def list_all(self, scope: Optional[MemoryScope] = None, limit: int = 1000) -> list[Memory]:
+        scope_key = _scope_key(scope)
+        return [
+            m for m in self._memories.values() if m.superseded_by is None and _scope_key(m.scope) == scope_key
+        ][:limit]
+
 
 class InMemoryGraphStore:
     def __init__(self) -> None:
