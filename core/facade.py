@@ -25,6 +25,14 @@ from domain.models.recall_query import RecallQuery
 from domain.models.recall_result import RecallResult
 from domain.models.scope import MemoryScope
 
+# triples_from/sync_to_graph parse "<source> <relation verb> <target>"
+# out of a Memory's content/relationships and write it via whatever
+# GraphStore is wired in — pure logic against the GraphStore Protocol,
+# no dependency on graphiti-core/Neo4j specifically, despite living
+# under providers/graphiti/ (that's the module's original home, not a
+# layering statement).
+from providers.graphiti.mapper import sync_to_graph
+
 
 class AftermindService:
     """Composition root: wires formation, reconciliation, recall,
@@ -96,6 +104,8 @@ class AftermindService:
                 refreshed = self.knowledge_store.get(evidence_memory.memory_id)
                 if refreshed is not None and refreshed.superseded_by:
                     self._lifecycle.archive_superseded(refreshed)
+            # StoredMemory -> entity/relationship extraction -> GraphStore.
+            sync_to_graph(memory, self.graph_store)
 
         self._checkpoints.checkpoint_experience(experience, memory_ids=[memory.memory_id] if memory else [])
         return memory

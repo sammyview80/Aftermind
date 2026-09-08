@@ -1,5 +1,13 @@
 from domain.models.scope import MemoryScope
-from providers.graphiti.store import GraphitiStore, _safe_relation_type
+from providers.graphiti.store import GraphitiStore, _scope_key
+
+
+class FakeWriter:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def add_fact(self, source, relation, target, group_id):
+        self.calls.append((source, relation, target, group_id))
 
 
 class FakeClient:
@@ -12,61 +20,51 @@ class FakeClient:
         return self.records
 
 
-def test_upsert_entity_merges_by_name_and_scope():
-    client = FakeClient()
+def test_upsert_entity_is_a_noop():
+    # graphiti-core has no concept of a bare entity outside a
+    # relationship — upsert_relationship covers both endpoints.
+    writer = FakeWriter()
+    GraphitiStore(writer, FakeClient()).upsert_entity("Aftermind")
+    assert writer.calls == []
+
+
+def test_upsert_relationship_delegates_to_the_graphiti_writer():
+    writer = FakeWriter()
     scope = MemoryScope.of(tenant_id="t1")
-    GraphitiStore(client).upsert_entity("Aftermind", scope=scope)
 
-    query, params = client.calls[0]
-    assert "MERGE (e:Entity" in query
-    assert params == {"name": "Aftermind", "scope": scope.key()}
+    GraphitiStore(writer, FakeClient()).upsert_relationship("Aftermind", "USES", "PostgreSQL", scope=scope)
 
-
-def test_upsert_entity_with_no_scope_uses_wildcard():
-    client = FakeClient()
-    GraphitiStore(client).upsert_entity("Aftermind")
-
-    _, params = client.calls[0]
-    assert params["scope"] == "*"
+    assert writer.calls == [("Aftermind", "USES", "PostgreSQL", _scope_key(scope))]
 
 
-def test_upsert_relationship_builds_merge_query_with_relation_type_inlined():
-    client = FakeClient()
-    scope = MemoryScope.of(tenant_id="t1")
-    GraphitiStore(client).upsert_relationship("Aftermind", "USES", "PostgreSQL", scope=scope)
-
-    query, params = client.calls[0]
-    assert "MERGE (a:Entity {name: $source" in query
-    assert "MERGE (b:Entity {name: $target" in query
-    assert "[:USES]" in query
-    assert params == {"source": "Aftermind", "target": "PostgreSQL", "scope": scope.key()}
+def test_upsert_relationship_with_no_scope_uses_unscoped_group_id():
+    writer = FakeWriter()
+    GraphitiStore(writer, FakeClient()).upsert_relationship("A", "USES", "B")
+    assert writer.calls == [("A", "USES", "B", "unscoped")]
 
 
-def test_upsert_relationship_sanitizes_unsafe_relation_type():
-    client = FakeClient()
-    GraphitiStore(client).upsert_relationship("A", "runs on; DROP DATABASE", "B")
-
-    query, _ = client.calls[0]
-    assert "DROP" not in query or "[:RUNS_ON_DROP_DATABASE]" in query
-    assert ";" not in query
-
-
-def test_find_related_returns_names_from_records():
+def test_find_related_queries_by_exact_name_and_group_id():
     client = FakeClient(records=[{"name": "PostgreSQL"}, {"name": "Graphiti"}])
-    related = GraphitiStore(client).find_related("Aftermind", limit=3)
+    scope = MemoryScope.of(tenant_id="t1")
+
+    related = GraphitiStore(FakeWriter(), client).find_related("Aftermind", scope=scope, limit=3)
 
     assert related == ["PostgreSQL", "Graphiti"]
+    query, params = client.calls[0]
+    assert "RELATES_TO" in query
+    assert params == {"name": "Aftermind", "group_id": _scope_key(scope), "limit": 3}
+
+
+def test_find_related_with_no_scope_uses_unscoped_group_id():
+    client = FakeClient(records=[])
+    GraphitiStore(FakeWriter(), client).find_related("Aftermind")
     _, params = client.calls[0]
-    assert params == {"name": "Aftermind", "scope": "*", "limit": 3}
+    assert params["group_id"] == "unscoped"
 
 
-def test_safe_relation_type_strips_unsafe_characters():
-    assert _safe_relation_type("uses; DROP TABLE") == "USES_DROP_TABLE"
-
-
-def test_safe_relation_type_empty_falls_back_to_related_to():
-    assert _safe_relation_type("!!!") == "RELATED_TO"
-
-
-def test_safe_relation_type_leading_digit_gets_prefixed():
-    assert _safe_relation_type("123abc") == "REL_123ABC"
+def test_scope_key_sanitizes_colons_and_asterisks_for_graphiti_group_id():
+    scope = MemoryScope.of(tenant_id="t1")
+    key = _scope_key(scope)
+    assert ":" not in key
+    assert "*" not in key
+    assert key.replace("_", "").replace("-", "").isalnum()

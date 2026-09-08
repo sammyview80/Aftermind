@@ -3,60 +3,56 @@ from typing import Optional
 
 from domain.models.scope import MemoryScope
 from providers.graphiti.client import Neo4jClient
+from providers.graphiti.graphiti_client import GraphitiWriter
 
-_UNSAFE_RELATION_CHARS = re.compile(r"[^A-Z0-9_]")
+_UNSAFE_GROUP_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def _scope_key(scope: Optional[MemoryScope]) -> str:
-    return scope.key() if scope is not None else "*"
-
-
-def _safe_relation_type(relation: str) -> str:
-    """Cypher relationship types can't be parameterized — they're
-    interpolated into the query string — so sanitize to [A-Z0-9_] only
-    and guarantee a valid label, rather than trust caller input."""
-    cleaned = re.sub(r"_+", "_", _UNSAFE_RELATION_CHARS.sub("_", relation.upper())).strip("_")
-    if not cleaned:
-        cleaned = "RELATED_TO"
-    if cleaned[0].isdigit():
-        cleaned = f"REL_{cleaned}"
-    return cleaned
+    """graphiti-core's group_id only allows alphanumeric/dash/underscore
+    — MemoryScope.key() uses ":" to join levels and "*" for unset ones,
+    both rejected. Sanitize rather than change MemoryScope's own key
+    format, which other stores (SQLite, OpenKnowledge) already rely on."""
+    raw = scope.key() if scope is not None else "unscoped"
+    return _UNSAFE_GROUP_ID_CHARS.sub("_", raw)
 
 
 class GraphitiStore:
-    """GraphStore implementation backed by Neo4jClient. Entities/
-    relationships are scoped (MemoryScope.key()) so different
-    tenants/projects don't bleed into each other's graph."""
+    """GraphStore implementation backed by real graphiti-core for writes
+    and direct Cypher for reads against the same Neo4j graph.
 
-    def __init__(self, client: Neo4jClient) -> None:
+    Entities/relationships are scoped via graphiti-core's own `group_id`
+    field (mapped from MemoryScope.key()), so different tenants/projects
+    don't bleed into each other's graph — matching Postgres/OpenKnowledge's
+    scope isolation.
+    """
+
+    def __init__(self, writer: GraphitiWriter, client: Neo4jClient) -> None:
+        self._writer = writer
         self._client = client
 
     def upsert_entity(self, name: str, scope: Optional[MemoryScope] = None) -> None:
-        self._client.run(
-            "MERGE (e:Entity {name: $name, scope: $scope})",
-            name=name,
-            scope=_scope_key(scope),
-        )
+        # graphiti-core creates entity nodes as part of add_triplet — a
+        # bare entity with no relationship isn't a graphiti-core concept
+        # on its own, so this is a no-op; upsert_relationship covers both
+        # endpoints.
+        pass
 
     def upsert_relationship(
         self, source: str, relation: str, target: str, scope: Optional[MemoryScope] = None
     ) -> None:
-        relation_type = _safe_relation_type(relation)
-        self._client.run(
-            f"MERGE (a:Entity {{name: $source, scope: $scope}}) "
-            f"MERGE (b:Entity {{name: $target, scope: $scope}}) "
-            f"MERGE (a)-[:{relation_type}]->(b)",
-            source=source,
-            target=target,
-            scope=_scope_key(scope),
-        )
+        self._writer.add_fact(source, relation, target, group_id=_scope_key(scope))
 
     def find_related(self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[str]:
+        # Case-insensitive: callers (e.g. RecallPlanner's keyword
+        # extraction) lowercase entity seeds, while entity names stored
+        # via add_fact keep the casing they were extracted with.
         records = self._client.run(
-            "MATCH (a:Entity {name: $name, scope: $scope})-[]->(b:Entity) "
+            "MATCH (a:Entity)-[:RELATES_TO]->(b:Entity) "
+            "WHERE toLower(a.name) = toLower($name) AND a.group_id = $group_id "
             "RETURN DISTINCT b.name AS name LIMIT $limit",
             name=entity,
-            scope=_scope_key(scope),
+            group_id=_scope_key(scope),
             limit=limit,
         )
         return [record["name"] for record in records]

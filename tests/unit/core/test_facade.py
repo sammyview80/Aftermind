@@ -103,3 +103,12 @@ def test_search_is_direct_and_bypasses_ranking_and_checkpoint():
     results = service.search("Graphiti", scope=scope)
 
     assert memory in results
+
+
+def test_observe_syncs_entities_and_relationships_to_the_graph_store():
+    scope = MemoryScope.of(tenant_id="t1")
+    service = _service(ScriptedLLM(action="create"))
+
+    service.observe(_experience("Aftermind uses PostgreSQL", scope))
+
+    assert service.graph_store.find_related("Aftermind", scope=scope) == ["PostgreSQL"]
