@@ -12,6 +12,8 @@ from core.reconciliation.evidence_retriever import EvidenceRetriever
 from core.reconciliation.reconciler import Reconciler
 from core.reconciliation.validator import Validator
 from domain.interfaces.checkpoint_store import CheckpointStore
+from domain.interfaces.decision_store import DecisionStore
+from domain.interfaces.episode_store import EpisodeStore
 from domain.interfaces.graph_store import GraphStore
 from domain.interfaces.knowledge_store import KnowledgeStore
 from domain.interfaces.lifecycle_store import LifecycleStore
@@ -39,9 +41,13 @@ class AftermindService:
         checkpoint_store: CheckpointStore,
         lifecycle_store: LifecycleStore,
         llm_provider: LLMProvider,
+        episode_store: Optional[EpisodeStore] = None,
+        decision_store: Optional[DecisionStore] = None,
     ) -> None:
         self.knowledge_store = knowledge_store
         self.graph_store = graph_store
+        self._episode_store = episode_store
+        self._decision_store = decision_store
 
         self._extractor = CandidateExtractor()
         self._evaluator = MemoryEvaluator()
@@ -62,6 +68,9 @@ class AftermindService:
         evidence -> reconcile -> validate -> apply. Returns the
         resulting memory, or None if nothing was worth remembering or
         the reconciler decided to ignore it."""
+        if self._episode_store is not None:
+            self._episode_store.save(experience)
+
         candidates = self._extractor.extract(experience)
         if not candidates:
             return None
@@ -73,6 +82,10 @@ class AftermindService:
         evidence = self._evidence_retriever.retrieve(candidate)
         decision = self._reconciler.reconcile(candidate, evidence)
         decision = self._validator.validate(decision, candidate, evidence)
+
+        if self._decision_store is not None:
+            self._decision_store.save(decision)
+
         memory = self._reconciler.apply(decision, candidate, self.knowledge_store)
 
         if memory is not None:
