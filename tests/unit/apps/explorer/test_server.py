@@ -140,6 +140,53 @@ def test_parse_scope_key_handles_empty_string():
     assert server._parse_scope_key("") == {name: None for name in server._HIERARCHY}
 
 
+def _seed_db_with_checkpoint_only_scope(db_path):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE memories (memory_id TEXT PRIMARY KEY, scope_key TEXT, scope_levels TEXT, content TEXT, "
+        "memory_type TEXT, entities TEXT, relationships TEXT, confidence REAL, version INTEGER, "
+        "superseded_by TEXT, source_candidate_ids TEXT, metadata TEXT, created_at TEXT, updated_at TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, scope_key TEXT, scope_levels TEXT, version INTEGER, "
+        "goal TEXT, completed TEXT, current TEXT, blockers TEXT, next_steps TEXT, memory_ids TEXT, "
+        "last_experience_id TEXT, reason TEXT, metadata TEXT, created_at TEXT)"
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    con.execute(
+        "INSERT INTO memories VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("m1", "scope-with-memories", '{"project_id":"has-memories"}', "a fact", "semantic", "[]", "[]", 0.9, 1, None, "[]", "{}", now, now),
+    )
+    con.execute(
+        "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("cp1", "scope-checkpoint-only", '{"project_id":"checkpoint-only"}', 1, "goal", "[]", "current", "[]", "[]", "[]", None, "manual", "{}", now),
+    )
+    con.commit()
+    con.close()
+
+
+def test_scopes_includes_checkpoint_only_projects_not_just_memory_projects(tmp_path, monkeypatch):
+    """Regression: a project that only ever got a checkpoint (no memory
+    formed yet) must still show up in the project picker, or its
+    checkpoints are unreachable from the UI."""
+    db = tmp_path / "t.db"
+    _seed_db_with_checkpoint_only_scope(str(db))
+    monkeypatch.setattr(server, "DATABASE_PATH", str(db))
+    client = TestClient(server.app)
+
+    scopes = client.get("/api/scopes").json()["scopes"]
+    by_key = {s["scope_key"]: s for s in scopes}
+
+    assert "scope-checkpoint-only" in by_key
+    assert by_key["scope-checkpoint-only"]["memory_count"] == 0
+    assert by_key["scope-checkpoint-only"]["checkpoint_count"] == 1
+    assert by_key["scope-with-memories"]["memory_count"] == 1
+    assert by_key["scope-with-memories"]["checkpoint_count"] == 0
+
+
 def test_health_reports_database_presence(tmp_path, monkeypatch):
     db = tmp_path / "test.db"
     db.write_text("")

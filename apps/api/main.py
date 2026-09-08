@@ -26,6 +26,10 @@ except ImportError:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     worker = None
+    # Crash recovery runs regardless of whether a worker thread is enabled:
+    # a job left "running" by a dead process must never depend on a
+    # background loop that this deployment may have turned off.
+    get_sync_worker().recover()
     if settings.sync_worker_enabled:
         # Crash recovery + retry loop for graph/document sync, in-process.
         # Run `aftermind worker` as a separate process and set

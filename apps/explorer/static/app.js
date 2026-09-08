@@ -48,7 +48,10 @@ async function loadScopes() {
 function labelForScope(s) {
   const levels = s.scope_levels || {};
   const name = levels.project_id || s.scope_key;
-  return `${name} (${s.memory_count} ${s.memory_count === 1 ? "memory" : "memories"})`;
+  const parts = [];
+  if (s.memory_count) parts.push(`${s.memory_count} ${s.memory_count === 1 ? "memory" : "memories"}`);
+  if (s.checkpoint_count) parts.push(`${s.checkpoint_count} ${s.checkpoint_count === 1 ? "checkpoint" : "checkpoints"}`);
+  return `${name}${parts.length ? " (" + parts.join(", ") + ")" : ""}`;
 }
 
 // --------------------------------------------------------------- overview
@@ -416,10 +419,10 @@ async function renderSessions() {
       <div id="sessions-list"><div class="spinner">Loading…</div></div>
     </div>
     <div class="section">
-      <div class="section-title">Progress over time</div>
+      <div class="section-title">Progress over time${state.scope ? "" : " — across all projects, pick one above to narrow it down"}</div>
       <div class="info-banner">
         <span class="info-icon">📌</span>
-        <div>Each entry below is a snapshot your assistant saved of "what we were doing" — so the next conversation (even a brand-new one) can continue instead of starting from scratch.</div>
+        <div>Each entry below is a snapshot your assistant saved of "what we were doing" — so the next conversation (even a brand-new one) can continue instead of starting from scratch. This is tracked per <b>project</b>, not per individual conversation — by design, progress belongs to the project, not to any one chat.</div>
       </div>
       <div id="checkpoint-timeline"><div class="spinner">Loading…</div></div>
       <div id="checkpoint-pagination"></div>

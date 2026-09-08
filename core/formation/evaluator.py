@@ -22,6 +22,48 @@ _INTERROGATIVE_STARTS = (
 )
 _MIN_STATEMENT_WORDS = 3
 
+# A request to the agent ("also commit and push", "make it more layman",
+# "restart the server") is a task, not a fact about the world. Tasks belong
+# to checkpoints (goal / next steps), not to semantic memory — stored as
+# facts they come back as nonsense "Current facts" on the next turn.
+_REQUEST_LEADS = (
+    "also", "please", "pls", "okay", "ok", "now", "next", "then", "just", "let's", "lets",
+    "can you", "could you", "would you", "will you", "i want", "i need", "i'd like", "we need",
+    "make sure", "go ahead", "try to", "don't", "do not",
+)
+_IMPERATIVE_VERBS = frozenset(
+    """add build change check clean commit configure create debug delete deploy do document
+    ensure explain fix generate give help implement install investigate keep list look make
+    merge move open push read refactor remove rename restart run save search set show start
+    stop test try update upgrade use verify write""".split()
+)
+_MARKUP_START = ("<", "[", "{")
+
+
+def is_request(content: str) -> bool:
+    raw = content.strip()
+    text = raw.lower()
+    if not text:
+        return False
+    if text.startswith(_REQUEST_LEADS):
+        return True
+    # Bare-verb openers only count when written as typed chat ("restart the
+    # server", "commit and push"). A capitalized opener is far more often a
+    # subject noun that happens to be a verb too ("Search changed its index
+    # from X to Y") — a fact, not an order.
+    first = text.split(None, 1)[0].strip(",.:;!")
+    return first in _IMPERATIVE_VERBS and raw[0].islower()
+
+
+def is_markup(content: str) -> bool:
+    return content.lstrip().startswith(_MARKUP_START) and ">" in content or content.lstrip().startswith("{")
+
+
+def is_not_a_fact(content: str) -> bool:
+    """Deterministic gate applied before any score: questions, requests,
+    filler and machine markup never become memories."""
+    return is_interrogative(content) or is_request(content) or is_conversational_filler(content) or is_markup(content)
+
 
 def is_interrogative(content: str) -> bool:
     text = content.strip()
@@ -82,7 +124,7 @@ class MemoryEvaluator:
         return sum(dimensions) / len(dimensions)
 
     def is_worth_remembering(self, candidate: Candidate) -> bool:
-        if is_interrogative(candidate.content) or is_conversational_filler(candidate.content):
+        if is_not_a_fact(candidate.content):
             return False
         return self.overall_score(candidate) >= self.threshold
 
@@ -136,7 +178,7 @@ class LLMMemoryEvaluator:
 
     def is_worth_remembering(self, candidate: Candidate) -> bool:
         # Deterministic policy applies before the model's scores: a
-        # question is never a fact, however confidently it was scored.
-        if is_interrogative(candidate.content) or is_conversational_filler(candidate.content):
+        # question or a request is never a fact, however confidently scored.
+        if is_not_a_fact(candidate.content):
             return False
         return self.overall_score(candidate) >= self.threshold

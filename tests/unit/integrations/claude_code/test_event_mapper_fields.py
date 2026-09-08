@@ -45,3 +45,22 @@ def test_prompt_observation_is_capped_like_tool_output():
 
 def test_real_statements_still_pass():
     assert observation_text_for_prompt({"prompt": "We decided the billing worker uses RabbitMQ."}).startswith("We decided")
+
+
+def test_prompt_skips_cross_session_message_tag():
+    """The real wire format is `<cross-session-message from="...">`, not
+    the `[Cross-session` guess this replaced — two outgoing SendMessage
+    payloads got merged into one memory at confidence 0.95 before this
+    was fixed."""
+    payload = {
+        "prompt": '<cross-session-message from="uds:/tmp/x.sock" from-name="peer">\n'
+        "Four issues found, please fix them all with tests.\n"
+        "</cross-session-message>"
+    }
+    assert observation_text_for_prompt(payload) == ""
+
+
+def test_any_leading_markup_tag_is_treated_as_system_payload():
+    assert observation_text_for_prompt({"prompt": '<cross-session-message from="uds:x">Four issues</cross-session-message>'}) == ""
+    assert observation_text_for_prompt({"prompt": "<some-future-tag>\ncontent"}) == ""
+    assert observation_text_for_prompt({"prompt": "x < y is a real statement about ordering"}) != ""

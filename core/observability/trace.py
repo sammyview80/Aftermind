@@ -237,6 +237,21 @@ class Tracer:
                 _LOG.exception("trace sink %r failed", sink)
 
 
+@contextmanager
+def attach(trace_obj: Optional[OperationTrace]) -> Iterator[Optional[OperationTrace]]:
+    """Make `trace_obj` the active trace inside this block — for work handed
+    to another thread that should still account to the originating
+    operation. No-op when None."""
+    if trace_obj is None:
+        yield None
+        return
+    token = _current.set(trace_obj)
+    try:
+        yield trace_obj
+    finally:
+        _current.reset(token)
+
+
 def record(**fields: Any) -> None:
     """Attach fields to the active trace, if any. Safe to call from
     anywhere in the pipeline — a no-op outside a trace."""
@@ -258,15 +273,27 @@ def append(key: str, value: Any) -> None:
 
 
 @contextmanager
-def span(name: str, reraise: bool = True) -> Iterator[Optional[Span]]:
-    """Time a stage on the active trace; yields None (and still runs the
-    block) when no trace is active."""
+def span(name: str, reraise: bool = True) -> Iterator[Span]:
+    """Time a stage on the active trace. With no active trace the span is
+    still created (just not recorded anywhere) so callers relying on
+    `reraise=False` for failure isolation get identical behavior whether
+    or not they run inside a trace — a sync handler executing on a
+    worker thread must not turn a store error into a dead thread."""
     trace = _current.get()
-    if trace is None:
-        yield None
+    if trace is not None:
+        with trace.span(name, reraise=reraise) as s:
+            yield s
         return
-    with trace.span(name, reraise=reraise) as s:
-        yield s
+    detached = Span(name=name, started_at=time.perf_counter())
+    try:
+        yield detached
+    except Exception as exc:  # noqa: BLE001 - same contract as OperationTrace.span
+        detached.status = FAILED
+        detached.error = f"{type(exc).__name__}: {exc}"
+        if reraise:
+            raise
+    finally:
+        detached.latency_ms = round((time.perf_counter() - detached.started_at) * 1000, 2)
 
 
 default_tracer = Tracer()

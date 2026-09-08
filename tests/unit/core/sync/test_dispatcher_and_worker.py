@@ -190,3 +190,56 @@ def test_worker_thread_starts_and_stops():
 
     assert not worker.running
     assert store.counts()[SyncJobStatus.DONE.value] == 1
+
+
+def test_eager_execution_is_bounded_and_finishes_in_background():
+    import threading as _t
+
+    store = InMemorySyncJobStore()
+    release = _t.Event()
+    done = _t.Event()
+
+    def slow(job):
+        release.wait(5)
+        done.set()
+
+    dispatcher = SyncDispatcher({SyncJobKind.GRAPH_SYNC: slow}, job_store=store, mode=EAGER, eager_timeout=0.05)
+    tracer, sink = _tracer()
+
+    with tracer.begin("observe"):
+        status = dispatcher.dispatch(SyncJobKind.GRAPH_SYNC, {"memory_id": "m1"})
+
+    assert status == trace.PENDING  # caller not held hostage
+    assert store.list_jobs()[0].status == SyncJobStatus.RUNNING  # still executing, not orphaned
+    release.set()
+    assert done.wait(2)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=2)
+    while store.list_jobs()[0].status != SyncJobStatus.DONE and datetime.now(timezone.utc) < deadline:
+        pass
+    assert store.list_jobs()[0].status == SyncJobStatus.DONE  # background thread persisted the outcome
+
+
+def test_eager_execution_within_budget_reports_real_status():
+    store = InMemorySyncJobStore()
+    dispatcher = SyncDispatcher({SyncJobKind.GRAPH_SYNC: FlakyHandler(failures=1)}, job_store=store, mode=EAGER, eager_timeout=2.0)
+    assert dispatcher.dispatch(SyncJobKind.GRAPH_SYNC, {}) == trace.PENDING
+    assert store.list_jobs()[0].status == SyncJobStatus.PENDING
+    assert store.list_jobs()[0].attempts == 1
+
+
+def test_worker_loop_recovers_orphans_that_appear_after_start():
+    store = InMemorySyncJobStore()
+    handler = FlakyHandler()
+    dispatcher = SyncDispatcher({SyncJobKind.GRAPH_SYNC: handler}, job_store=store, mode=EAGER)
+    worker = SyncWorker(store, dispatcher, tracer=trace.Tracer(sinks=[]), poll_interval=0.01, stale_running_seconds=0)
+    worker.start()
+    try:
+        # Orphan created while the loop is already running: enqueue RUNNING, never flush.
+        dispatcher.enqueue(SyncJobKind.GRAPH_SYNC, {"memory_id": "orphan"})
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=3)
+        while store.counts()[SyncJobStatus.DONE.value] == 0 and datetime.now(timezone.utc) < deadline:
+            pass
+    finally:
+        worker.stop()
+    assert store.counts()[SyncJobStatus.DONE.value] == 1
+    assert handler.calls == [{"memory_id": "orphan"}]

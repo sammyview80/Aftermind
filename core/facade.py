@@ -25,7 +25,7 @@ from core.recall.retriever import Retriever
 from core.reconciliation.evidence_retriever import EvidenceRetriever
 from core.reconciliation.reconciler import Reconciler
 from core.reconciliation.validator import Validator
-from core.sync.dispatcher import EAGER, SyncDispatcher
+from core.sync.dispatcher import DEFAULT_EAGER_TIMEOUT_SECONDS, EAGER, SyncDispatcher
 from domain.enums.memory_status import MemoryStatus
 from domain.enums.sync_job_kind import SyncJobKind
 from domain.interfaces.checkpoint_store import CheckpointStore
@@ -117,6 +117,7 @@ class AftermindService:
         unit_of_work: Optional[UnitOfWork] = None,
         sync_mode: str = EAGER,
         sync_max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        sync_eager_timeout: Optional[float] = DEFAULT_EAGER_TIMEOUT_SECONDS,
         tracer: trace.Tracer = trace.default_tracer,
     ) -> None:
         self.knowledge_store = knowledge_store
@@ -158,6 +159,7 @@ class AftermindService:
             job_store=sync_job_store,
             mode=sync_mode,
             max_attempts=sync_max_attempts,
+            eager_timeout=sync_eager_timeout,
         )
 
     def _transaction(self):

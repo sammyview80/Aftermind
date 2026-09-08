@@ -99,6 +99,10 @@ class SyncWorker:
         self.recover()
         while not self._stop.is_set():
             try:
+                # Jobs orphaned *after* start (a request thread died mid-flush,
+                # a hung handler) must be picked up too — recovery is one cheap
+                # UPDATE, so run it every tick rather than only at boot.
+                self.recover()
                 processed = sum(self.run_once().values())
             except Exception:  # noqa: BLE001 - the loop must survive a bad tick
                 _LOG.exception("sync worker tick failed")

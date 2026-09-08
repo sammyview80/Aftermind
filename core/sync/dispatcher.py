@@ -18,6 +18,7 @@ is no durability but the isolation still holds: flush() runs the
 handler inline and a failure is recorded on the trace instead of raised.
 """
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional
 
@@ -47,6 +48,13 @@ TRACE_FIELD_FOR_KIND = {
 
 _STATUS_RANK = {trace.SKIPPED: 0, trace.OK: 1, trace.PENDING: 2, trace.FAILED: 3}
 
+# How long the eager path waits for a secondary-store write before handing
+# the request back to the caller. The handler keeps running on its own
+# thread and records the outcome itself; the caller just sees `pending`.
+# Without this, one slow graphiti/LLM call turned observe() into a hang
+# that outlived the client's timeout, leaving the job "running" forever.
+DEFAULT_EAGER_TIMEOUT_SECONDS = 15.0
+
 
 class SyncDispatcher:
     def __init__(
@@ -55,6 +63,7 @@ class SyncDispatcher:
         job_store: Optional[SyncJobStore] = None,
         mode: str = EAGER,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        eager_timeout: Optional[float] = DEFAULT_EAGER_TIMEOUT_SECONDS,
     ) -> None:
         if mode not in (EAGER, BACKGROUND):
             raise ValueError(f"sync mode must be {EAGER!r} or {BACKGROUND!r}, got {mode!r}")
@@ -62,6 +71,7 @@ class SyncDispatcher:
         self._job_store = job_store
         self.mode = mode
         self._max_attempts = max_attempts
+        self.eager_timeout = eager_timeout
 
     @property
     def durable(self) -> bool:
@@ -100,7 +110,7 @@ class SyncDispatcher:
             elif self.mode == BACKGROUND:
                 status = trace.PENDING
             else:
-                status = self.execute(job)
+                status = self._execute_bounded(job)
             self._annotate(field, status)
             if _STATUS_RANK.get(status, 0) >= _STATUS_RANK.get(outcome.get(field, trace.SKIPPED), 0):
                 outcome[field] = status
@@ -111,6 +121,35 @@ class SyncDispatcher:
         transaction. Returns the resulting status."""
         job = self.enqueue(kind, payload, scope)
         return self.flush([job])[TRACE_FIELD_FOR_KIND[kind]]
+
+    def _execute_bounded(self, job: SyncJob) -> str:
+        """execute() with a wall-clock bound for the eager path. On timeout
+        the worker thread finishes (and persists) on its own; we report
+        `pending` so the caller returns. Trace fields are captured before
+        the thread detaches, since contextvars don't cross threads."""
+        if self.eager_timeout is None:
+            return self.execute(job)
+        result: dict[str, str] = {}
+        parent_trace = trace.Tracer.current()
+
+        def run() -> None:
+            # Re-enter the parent's trace so spans/llm accounting still land
+            # on the observe trace when the handler finishes in time.
+            with trace.attach(parent_trace):
+                result["status"] = self.execute(job)
+
+        thread = threading.Thread(target=run, name=f"aftermind-eager-{job.kind.value}", daemon=True)
+        thread.start()
+        thread.join(self.eager_timeout)
+        if thread.is_alive():
+            _LOG.warning(
+                "sync job %s (%s) still running after %.0fs; continuing in background",
+                job.job_id,
+                job.kind.value,
+                self.eager_timeout,
+            )
+            return trace.PENDING
+        return result.get("status", trace.FAILED)
 
     def execute(self, job: SyncJob) -> str:
         """Run one durable job's handler and persist the outcome. Shared

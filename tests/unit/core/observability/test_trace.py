@@ -76,7 +76,10 @@ def test_module_level_helpers_are_noops_outside_a_trace():
     trace.increment("n")
     trace.append("list", "a")
     with trace.span("nothing") as s:
-        assert s is None
+        assert s is not None and s.status == trace.OK
+    with trace.span("boom", reraise=False) as s:
+        raise ValueError("isolated")
+    assert s.status == trace.FAILED
 
 
 def test_child_trace_links_to_parent_by_id():

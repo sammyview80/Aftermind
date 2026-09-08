@@ -98,24 +98,40 @@ def _parse_scope_key(key: str) -> dict:
 
 @app.get("/api/scopes")
 def list_scopes():
-    """Every distinct scope_key that has ever had a memory, most
-    recently active first — powers the scope picker in the UI."""
+    """Every distinct scope_key that has ever had a memory OR a
+    checkpoint, most recently active first — powers the project picker.
+    Union of both tables, not just memories: a project that's only ever
+    been checkpointed (no memory formed yet) would otherwise be
+    unselectable and its checkpoints unreachable from the UI."""
     with _db() as con:
-        rows = con.execute(
-            "SELECT scope_key, scope_levels, MAX(updated_at) AS last_activity, COUNT(*) AS memory_count "
-            "FROM memories GROUP BY scope_key ORDER BY last_activity DESC"
+        memory_rows = con.execute(
+            "SELECT scope_key, scope_levels, updated_at AS activity_at, 1 AS is_memory FROM memories"
         ).fetchall()
-    return {
-        "scopes": [
+        checkpoint_rows = con.execute(
+            "SELECT scope_key, scope_levels, created_at AS activity_at, 0 AS is_memory FROM checkpoints"
+        ).fetchall()
+
+    by_scope: dict[str, dict] = {}
+    for r in (*memory_rows, *checkpoint_rows):
+        entry = by_scope.setdefault(
+            r["scope_key"],
             {
                 "scope_key": r["scope_key"],
                 "scope_levels": _load_json(r["scope_levels"], {}),
-                "last_activity": r["last_activity"],
-                "memory_count": r["memory_count"],
-            }
-            for r in rows
-        ]
-    }
+                "last_activity": r["activity_at"],
+                "memory_count": 0,
+                "checkpoint_count": 0,
+            },
+        )
+        if r["activity_at"] and r["activity_at"] > (entry["last_activity"] or ""):
+            entry["last_activity"] = r["activity_at"]
+        if r["is_memory"]:
+            entry["memory_count"] += 1
+        else:
+            entry["checkpoint_count"] += 1
+
+    scopes = sorted(by_scope.values(), key=lambda s: s["last_activity"] or "", reverse=True)
+    return {"scopes": scopes}
 
 
 # -------------------------------------------------------------- overview

@@ -11,3 +11,4 @@ __pycache__/
 openknowledge_store/
 build/
 .aftermind/
+*.db.bak-*

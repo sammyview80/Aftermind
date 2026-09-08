@@ -3,6 +3,7 @@ hooks.md contract: UserPromptSubmit gives `prompt`; PostToolUse gives
 `tool_name`/`tool_input`/`tool_response`; PostToolUseFailure gives
 `tool_name`/`tool_input`/`error`) onto Aftermind's
 framework-neutral event vocabulary."""
+import re
 from typing import Any
 
 DEFAULT_MAX_CHARS = 500
@@ -10,10 +11,15 @@ DEFAULT_MAX_CHARS = 500
 # Claude Code delivers some machine-generated turns through the same
 # UserPromptSubmit hook as real typed prompts: subagent task
 # notifications, system reminders, the caveat wrapper around local
-# command output, and slash commands. None of those are the user stating
-# something worth remembering, and the notifications can run to many
-# kilobytes — observing them verbatim once flooded a scope's recall with
-# four audit reports at confidence 0.95.
+# command output, cross-session messages from peer agents, and slash
+# commands. None of those are the user stating something worth
+# remembering, and they can run to many kilobytes — observing them
+# verbatim once flooded a scope's recall with four audit reports at
+# confidence 0.95, and separately merged two outgoing SendMessage
+# payloads (thousands of chars of another agent's own report text) into
+# a single memory at confidence 0.95. The `<cross-session-message` tag
+# is the real wire format (verified against live payloads); the earlier
+# `"[Cross-session"` guess never matched it and let both through.
 _SYSTEM_PAYLOAD_PREFIXES = (
     "<task-notification>",
     "<system-reminder>",
@@ -21,9 +27,12 @@ _SYSTEM_PAYLOAD_PREFIXES = (
     "<command-name>",
     "<command-message>",
     "<local-command-stdout>",
+    "<cross-session-message",
     "[Request interrupted",
-    "[Cross-session",
 )
+
+
+_MARKUP_TAG = re.compile(r"^<[a-zA-Z][\w-]*(?:\s[^>]*)?>")
 
 
 def is_system_payload(text: str) -> bool:
@@ -32,6 +41,11 @@ def is_system_payload(text: str) -> bool:
         return False
     if stripped.startswith("/") and " " not in stripped.split("\n", 1)[0].strip()[:2]:
         return True  # slash command such as /clear or /model
+    # Any prompt that opens with a markup tag is machine-generated context
+    # (task notifications, cross-session messages, system reminders, ...),
+    # never something the user typed to remember.
+    if _MARKUP_TAG.match(stripped):
+        return True
     return stripped.startswith(_SYSTEM_PAYLOAD_PREFIXES)
 
 

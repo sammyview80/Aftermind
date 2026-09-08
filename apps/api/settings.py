@@ -57,6 +57,7 @@ class Settings:
     sync_batch_size: int = DEFAULT_BATCH_SIZE
     sync_max_attempts: int = DEFAULT_MAX_ATTEMPTS
     sync_stale_running_seconds: float = DEFAULT_STALE_RUNNING_SECONDS
+    sync_eager_timeout_seconds: float = 15.0  # eager secondary write budget before observe() returns `pending`
 
     # Observability
     log_level: str = "INFO"
@@ -90,6 +91,7 @@ class Settings:
             sync_stale_running_seconds=float(
                 env("AFTERMIND_SYNC_STALE_RUNNING_SECONDS", DEFAULT_STALE_RUNNING_SECONDS)
             ),
+            sync_eager_timeout_seconds=float(env("AFTERMIND_SYNC_EAGER_TIMEOUT_SECONDS", 15.0)),
             log_level=env("AFTERMIND_LOG_LEVEL", "INFO").upper(),
             log_format=env("AFTERMIND_LOG_FORMAT", "text").lower(),
             trace_buffer_size=int(env("AFTERMIND_TRACE_BUFFER", 200)),
