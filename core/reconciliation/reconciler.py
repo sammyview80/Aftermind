@@ -71,7 +71,10 @@ class Reconciler:
 
         if decision.action == ReconciliationAction.CREATE or decision.target_memory_id is None:
             memory = Memory(
-                scope=candidate.scope,
+                # Durable memory outlives the run/session it was learned
+                # in — strip execution-identity scope levels so it's
+                # findable from a later session, not just this one.
+                scope=candidate.scope.stable() if candidate.scope else None,
                 content=candidate.content,
                 memory_type=candidate.memory_type,
                 entities=candidate.entities,
@@ -113,7 +116,7 @@ class Reconciler:
 
         if decision.action == ReconciliationAction.SUPERSEDE:
             successor = Memory(
-                scope=candidate.scope,
+                scope=candidate.scope.stable() if candidate.scope else None,
                 content=candidate.content,
                 memory_type=candidate.memory_type,
                 entities=candidate.entities,

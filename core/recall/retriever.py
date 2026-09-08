@@ -24,15 +24,21 @@ class Retriever:
         self._graph_store = graph_store
 
     def retrieve(self, plan: RecallPlan) -> RetrievedEvidence:
+        # Durable memories/entities are stored under stabilized scope
+        # (see reconciler.apply, graphiti store) — search with the same
+        # stabilization so a new session's scope (different session_id/
+        # run_id) still finds them.
+        scope = plan.scope.stable() if plan.scope else None
+
         by_id: dict[str, Memory] = {}
         for term in plan.search_terms:
-            for memory in self._knowledge_store.search(term, scope=plan.scope, limit=plan.limit):
+            for memory in self._knowledge_store.search(term, scope=scope, limit=plan.limit):
                 if not plan.memory_types or memory.memory_type in plan.memory_types:
                     by_id.setdefault(memory.memory_id, memory)
 
         entities: dict[str, None] = {}
         for seed in plan.entity_seeds:
-            for related in self._graph_store.find_related(seed, scope=plan.scope, limit=plan.limit):
+            for related in self._graph_store.find_related(seed, scope=scope, limit=plan.limit):
                 entities.setdefault(related, None)
 
         return RetrievedEvidence(memories=tuple(by_id.values()), related_entities=tuple(entities))

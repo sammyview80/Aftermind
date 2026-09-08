@@ -93,3 +93,31 @@ def test_checkpoint_experience_triggers_on_task_failed_and_handoff():
 
     assert manager.checkpoint_experience(failed).reason == "task_failed"
     assert manager.checkpoint_experience(handoff).reason == "agent_handoff"
+
+
+def test_latest_finds_a_checkpoint_saved_under_a_different_session_id():
+    """A checkpoint must outlive the session it was created in — that's
+    the entire point of "continue where I left off" across a new
+    session. Scope is stabilized (execution levels stripped) at both
+    create() and latest() so a new session_id/run_id doesn't hide it."""
+    store = FakeCheckpointStore()
+    manager = CheckpointManager(store)
+    scope_session_1 = MemoryScope.of(tenant_id="t1", session_id="s1")
+    scope_session_2 = MemoryScope.of(tenant_id="t1", session_id="s2")
+
+    manager.create(scope=scope_session_1, goal="Build login flow")
+
+    found = manager.latest(scope_session_2)
+    assert found is not None
+    assert found.goal == "Build login flow"
+
+
+def test_create_increments_version_across_different_session_ids():
+    store = FakeCheckpointStore()
+    manager = CheckpointManager(store)
+
+    first = manager.create(scope=MemoryScope.of(tenant_id="t1", session_id="s1"), goal="first")
+    second = manager.create(scope=MemoryScope.of(tenant_id="t1", session_id="s2"), goal="second")
+
+    assert first.version == 1
+    assert second.version == 2

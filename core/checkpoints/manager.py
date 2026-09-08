@@ -30,6 +30,10 @@ class CheckpointManager:
         reason: str = "",
         metadata: Optional[dict[str, Any]] = None,
     ) -> Checkpoint:
+        # A checkpoint outlives the run/session it was created in — "continue
+        # where I left off" means finding it from a *new* session, so it's
+        # stored and looked up under stabilized (execution-scope-stripped) scope.
+        scope = scope.stable() if scope is not None else None
         previous = self._store.latest(scope)
         checkpoint = Checkpoint(
             scope=scope,
@@ -47,7 +51,7 @@ class CheckpointManager:
         return self._store.save(checkpoint)
 
     def latest(self, scope: Optional[MemoryScope] = None) -> Optional[Checkpoint]:
-        return self._store.latest(scope)
+        return self._store.latest(scope.stable() if scope is not None else None)
 
     def checkpoint_experience(
         self,

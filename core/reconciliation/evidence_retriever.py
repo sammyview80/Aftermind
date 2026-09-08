@@ -14,4 +14,8 @@ class EvidenceRetriever:
         self._limit = limit
 
     def retrieve(self, candidate: Candidate) -> list[Memory]:
-        return self._store.search(candidate.content, scope=candidate.scope, limit=self._limit)
+        # Stored memories carry stabilized (execution-scope-stripped)
+        # scope — search with the same stabilized scope so evidence from
+        # earlier sessions is actually found, not just this run's.
+        scope = candidate.scope.stable() if candidate.scope else None
+        return self._store.search(candidate.content, scope=scope, limit=self._limit)
