@@ -1,0 +1,6 @@
+name: aftermind
+version: "1.0"
+description: >
+  Recalls Aftermind memory before each turn (pre_llm_call) and injects it
+  into the user message. Milestone 1 only — observe/checkpoint are not
+  wired yet.
