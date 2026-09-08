@@ -62,6 +62,34 @@ def test_find_related_with_no_scope_uses_unscoped_group_id():
     assert params["group_id"] == "unscoped"
 
 
+def test_mark_historical_sets_expired_at_on_the_matching_edge():
+    client = FakeClient()
+    scope = MemoryScope.of(tenant_id="t1")
+
+    GraphitiStore(FakeWriter(), client).mark_historical("Billing", "USES", "Redis", scope=scope)
+
+    query, params = client.calls[0]
+    assert "SET rel.expired_at" in query
+    assert params == {"source": "Billing", "target": "Redis", "relation": "USES", "group_id": _scope_key(scope)}
+
+
+def test_find_relationships_excludes_expired_edges_in_query():
+    client = FakeClient(records=[])
+    GraphitiStore(FakeWriter(), client).find_relationships("Billing")
+    query, _ = client.calls[0]
+    assert "rel.expired_at IS NULL" in query
+
+
+def test_find_historical_relationships_only_matches_expired_edges():
+    client = FakeClient(records=[{"source": "Billing", "relation": "USES", "target": "Redis"}])
+
+    relationships = GraphitiStore(FakeWriter(), client).find_historical_relationships("Billing")
+
+    assert relationships == [("Billing", "USES", "Redis")]
+    query, _ = client.calls[0]
+    assert "rel.expired_at IS NOT NULL" in query
+
+
 def test_scope_key_sanitizes_colons_and_asterisks_for_graphiti_group_id():
     scope = MemoryScope.of(tenant_id="t1")
     key = _scope_key(scope)

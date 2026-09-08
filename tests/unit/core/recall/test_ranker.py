@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
 from core.recall.ranker import Ranker
+from domain.enums.memory_status import MemoryStatus
 from domain.models.memory import Memory
+from domain.models.scope import MemoryScope
 
 
 def test_rank_orders_by_relevance_to_search_terms():
@@ -40,3 +42,25 @@ def test_rank_respects_limit():
 
 def test_rank_empty_memories_returns_empty_list():
     assert Ranker().rank(("anything",), []) == []
+
+
+def test_rank_prefers_active_status_over_decayed_when_otherwise_equal():
+    now = datetime.now(timezone.utc)
+    active = Memory(content="topic x", confidence=0.5, updated_at=now)
+    decayed = Memory(content="topic x", confidence=0.5, updated_at=now)
+
+    statuses = {active.memory_id: MemoryStatus.ACTIVE, decayed.memory_id: MemoryStatus.DECAYED}
+    ranked = Ranker().rank(("topic x",), [decayed, active], statuses=statuses)
+
+    assert ranked[0] is active
+
+
+def test_rank_prefers_closer_scope_match_when_otherwise_equal():
+    now = datetime.now(timezone.utc)
+    query_scope = MemoryScope.of(tenant_id="t1", project_id="billing")
+    close = Memory(content="topic x", confidence=0.5, updated_at=now, scope=MemoryScope.of(tenant_id="t1", project_id="billing"))
+    far = Memory(content="topic x", confidence=0.5, updated_at=now, scope=MemoryScope.of(tenant_id="t1", project_id="other"))
+
+    ranked = Ranker().rank(("topic x",), [far, close], query_scope=query_scope)
+
+    assert ranked[0] is close

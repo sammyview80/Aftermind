@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from core.lifecycle import archival, decay, forgetting, reinforcement
+from domain.enums.memory_status import MemoryStatus
 from domain.interfaces.lifecycle_store import LifecycleStore
 from domain.models.knowledge_document import KnowledgeDocument
 from domain.models.memory import Memory
@@ -34,6 +35,13 @@ class LifecycleManager:
             )
         )
 
+    def status_of(self, memory_id: str, scope: Optional[MemoryScope] = None) -> MemoryStatus:
+        """The recorded lifecycle status for one memory, defaulting to
+        ACTIVE if no lifecycle record exists yet (e.g. ranking a memory
+        recalled before get_or_create ever ran for it)."""
+        lifecycle = self._store.get(memory_id, scope=scope)
+        return lifecycle.status if lifecycle is not None else MemoryStatus.ACTIVE
+
     def record_access(
         self, memory_id: str, scope: Optional[MemoryScope] = None, at: Optional[datetime] = None
     ) -> MemoryLifecycle:
@@ -57,6 +65,22 @@ class LifecycleManager:
         for lifecycle in self._store.list_all(scope=scope):
             updated.append(self._store.save(decay.apply_decay(lifecycle, now=at)))
         return updated
+
+    def run_hygiene_sweep(self, scope: Optional[MemoryScope] = None, at: Optional[datetime] = None) -> list[MemoryLifecycle]:
+        """The memory-hygiene pass: decay every lifecycle record in scope,
+        then archive (never delete) any that came out fully stale
+        (EXPIRED) and were never once recalled (access_count == 0) —
+        "low-value + old + never recalled -> decay -> archive", not
+        immediate deletion. A memory that was accessed even once is left
+        merely EXPIRED/DECAYED, not archived — some use is still a
+        signal worth keeping active for."""
+        archived = []
+        for lifecycle in self.sweep_decay(scope=scope, at=at):
+            if lifecycle.status == MemoryStatus.EXPIRED and lifecycle.access_count == 0:
+                archived.append(self._store.save(archival.archive(lifecycle, reason="decayed_unused", at=at)))
+            else:
+                archived.append(lifecycle)
+        return archived
 
     def archive_superseded(self, memory: Memory, at: Optional[datetime] = None) -> Optional[MemoryLifecycle]:
         """Memory superseded -> archive."""

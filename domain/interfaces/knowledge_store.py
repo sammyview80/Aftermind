@@ -24,3 +24,10 @@ class KnowledgeStore(Protocol):
         every candidate in scope to cluster, not just the top-k for one
         query."""
         ...
+
+    def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        """Superseded memories in scope relevant to `query` — used by
+        recall to surface historical context (e.g. "Redis was replaced")
+        alongside current facts, which search()/list_all() deliberately
+        exclude."""
+        ...

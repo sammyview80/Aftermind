@@ -106,3 +106,24 @@ def sync_to_graph(
         graph_store.upsert_entity(triple.target, scope=item.scope)
         graph_store.upsert_relationship(triple.source, triple.relation, triple.target, scope=item.scope)
     return triples
+
+
+def mark_stale_in_graph(
+    memory: Memory,
+    graph_store: GraphStore,
+    llm_extractor: Optional[LLMTripleExtractor] = None,
+) -> list[Triple]:
+    """The supersede-time counterpart to sync_to_graph: re-derive the
+    triples a now-superseded memory would have written, and mark each
+    as historical rather than deleting it — "Billing -[USES]-> Redis"
+    stays queryable for "what did billing use before?" even after
+    "Billing -[USES]-> RabbitMQ" becomes the current relationship.
+    Best-effort: a store without mark_historical (an older fake in a
+    test) is simply skipped, not an error."""
+    triples = extract_validated_triples(memory, llm_extractor)
+    mark_historical = getattr(graph_store, "mark_historical", None)
+    if mark_historical is None:
+        return triples
+    for triple in triples:
+        mark_historical(triple.source, triple.relation, triple.target, scope=memory.scope)
+    return triples

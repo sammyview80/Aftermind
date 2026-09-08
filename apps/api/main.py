@@ -3,7 +3,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from fastapi import FastAPI
 
 from apps.api.deps import get_service
-from apps.api.rest import checkpoint, consolidate, health, observe, recall
+from apps.api.rest import checkpoint, consolidate, health, maintenance, observe, recall
 
 try:
     from apps.api.mcp.server import build_asgi_app
@@ -38,6 +38,7 @@ app.include_router(observe.router)
 app.include_router(recall.router)
 app.include_router(checkpoint.router)
 app.include_router(consolidate.router)
+app.include_router(maintenance.router)
 
 if mcp_app is not None:
     app.mount("/mcp", mcp_app)

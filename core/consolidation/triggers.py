@@ -4,6 +4,12 @@ from domain.enums.event_type import EventType
 
 DEFAULT_MEMORY_COUNT_THRESHOLD = 3
 
+# Automatic (unsupervised) promotion into OpenKnowledge is deliberately
+# more conservative than a manual/explicit consolidate() call — nobody
+# is reviewing the trigger decision, so it should fire less eagerly,
+# not on every handful of related memories.
+AUTO_CONSOLIDATION_MEMORY_THRESHOLD = 5
+
 # Event types that mark a natural point to consider consolidating —
 # mirrors core/checkpoints/triggers.py's DEFAULT_CHECKPOINT_TRIGGERS,
 # since "worth checkpointing" and "worth consolidating" are both tied to
@@ -24,6 +30,7 @@ class ConsolidationTrigger(str, Enum):
     MEMORY_COUNT = "memory_count"  # total memory count in scope crossed a threshold
     MILESTONE = "milestone"  # a project milestone event occurred
     SESSION_COMPLETE = "session_complete"  # session/task lifecycle ended
+    STALE_PAGE = "stale_page"  # an existing OpenKnowledge section no longer reflects current live memories
     MANUAL = "manual"  # explicit user/operator request
 
 

@@ -20,7 +20,14 @@ class ContextBuilder:
         checkpoint: Optional[Checkpoint],
         ranked_memories: list[Memory],
         related_entities: tuple[str, ...] = (),
+        relationships: tuple[tuple[str, str, str], ...] = (),
+        historical_memories: tuple[Memory, ...] = (),
+        knowledge_excerpts: tuple[str, ...] = (),
     ) -> str:
+        """Fuse checkpoint + current facts + historical facts +
+        relationships + consolidated knowledge + related entities into
+        one compact block — one clean context package, not one blob per
+        source. Sections that have nothing to say are simply omitted."""
         sections: list[str] = []
 
         if checkpoint is not None:
@@ -29,7 +36,19 @@ class ContextBuilder:
         included = ranked_memories[: self._max_memories]
         if included:
             lines = "\n".join(f"- {m.content}" for m in included)
-            sections.append(f"## Relevant memories\n{lines}")
+            sections.append(f"## Current facts\n{lines}")
+
+        if historical_memories:
+            lines = "\n".join(f"- {m.content} (superseded)" for m in historical_memories[: self._max_memories])
+            sections.append(f"## Recent history\n{lines}")
+
+        if relationships:
+            lines = "\n".join(f"- {s} -[{r}]-> {t}" for s, r, t in relationships[: self._max_entities])
+            sections.append(f"## Relationships\n{lines}")
+
+        if knowledge_excerpts:
+            lines = "\n\n".join(knowledge_excerpts)
+            sections.append(f"## From company knowledge\n{lines}")
 
         if related_entities:
             entities = ", ".join(related_entities[: self._max_entities])

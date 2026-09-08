@@ -27,7 +27,7 @@ def test_build_includes_ranked_memories_section():
     memories = [Memory(content="User prefers dark mode"), Memory(content="Team uses RabbitMQ")]
     context = ContextBuilder().build(None, memories, ())
 
-    assert "## Relevant memories" in context
+    assert "## Current facts" in context
     assert "- User prefers dark mode" in context
     assert "- Team uses RabbitMQ" in context
 
@@ -52,5 +52,49 @@ def test_build_with_nothing_returns_empty_string():
 def test_build_omits_empty_sections():
     context = ContextBuilder().build(None, [], ("entity_a",))
     assert "## Where you left off" not in context
-    assert "## Relevant memories" not in context
+    assert "## Current facts" not in context
     assert "## Related entities" in context
+
+
+def test_build_includes_historical_memories_as_superseded():
+    historical = [Memory(content="Billing used Redis before")]
+    context = ContextBuilder().build(None, [], (), historical_memories=tuple(historical))
+
+    assert "## Recent history" in context
+    assert "- Billing used Redis before (superseded)" in context
+
+
+def test_build_includes_relationships_section():
+    relationships = (("RabbitMQ", "part_of", "payments architecture"),)
+    context = ContextBuilder().build(None, [], (), relationships=relationships)
+
+    assert "## Relationships" in context
+    assert "- RabbitMQ -[part_of]-> payments architecture" in context
+
+
+def test_build_includes_knowledge_excerpts_section():
+    context = ContextBuilder().build(None, [], (), knowledge_excerpts=("### Billing Architecture\nUses RabbitMQ.",))
+
+    assert "## From company knowledge" in context
+    assert "### Billing Architecture" in context
+    assert "Uses RabbitMQ." in context
+
+
+def test_build_fuses_all_sources_into_one_compact_context():
+    checkpoint = Checkpoint(version=1, goal="Migrate billing workers", current="in progress")
+    current = [Memory(content="Billing now uses RabbitMQ")]
+    historical = [Memory(content="Billing used Redis before")]
+    relationships = (("RabbitMQ", "part_of", "payments architecture"),)
+    excerpts = ("### Billing Architecture\nRabbitMQ backs billing.",)
+
+    context = ContextBuilder().build(
+        checkpoint, current, ("RabbitMQ",), relationships=relationships, historical_memories=historical,
+        knowledge_excerpts=excerpts,
+    )
+
+    # One package, sections in a stable, readable order.
+    assert context.index("## Where you left off") < context.index("## Current facts")
+    assert context.index("## Current facts") < context.index("## Recent history")
+    assert context.index("## Recent history") < context.index("## Relationships")
+    assert context.index("## Relationships") < context.index("## From company knowledge")
+    assert context.index("## From company knowledge") < context.index("## Related entities")

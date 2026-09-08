@@ -50,7 +50,13 @@ class FakeDocumentStore:
         return document
 
     def search(self, query, scope=None, limit=5):
-        return []
+        query_words = set(query.lower().split())
+
+        def matches(document) -> bool:
+            text = (document.title + " " + " ".join(s.heading + " " + s.body for s in document.sections)).lower()
+            return bool(query_words & set(text.split()))
+
+        return [d for d in self._docs.values() if matches(d)][:limit]
 
 
 def _service(llm, document_store=None) -> AftermindService:
@@ -64,12 +70,13 @@ def _service(llm, document_store=None) -> AftermindService:
     )
 
 
-def _experience(text: str, scope=None):
+def _experience(text: str, scope=None, event_type=None):
     from domain.enums.event_type import EventType
     from domain.models.event import Event
     from domain.models.experience import Experience
 
-    return Experience(scope=scope, events=[Event(event_type=EventType.AGENT_MESSAGE)], output=text)
+    event_type = event_type or EventType.AGENT_MESSAGE
+    return Experience(scope=scope, events=[Event(event_type=event_type)], output=text)
 
 
 def test_observe_creates_a_memory_and_lifecycle_record():
@@ -234,3 +241,167 @@ def test_checkpoint_from_text_uses_previous_goal_as_continuity_context():
     service.checkpoint_from_text(scope=scope, text="Still working on it.")
 
     assert "Integrate OpenKnowledge" in seen_prompts[0]
+
+
+def test_observe_auto_consolidates_once_five_related_memories_exist():
+    scope = MemoryScope.of(tenant_id="t1", project_id="aftermind")
+    consolidation_response = json.dumps(
+        {
+            "content": "SQLite is Aftermind's canonical local memory store.",
+            "confidence": 0.9,
+            "reasoning": "Five consistent statements about Aftermind's SQLite storage.",
+        }
+    )
+    document_store = FakeDocumentStore()
+    service = _service(ScriptedLLM(action="create", consolidation_response=consolidation_response), document_store)
+
+    statements = [
+        "Aftermind uses SQLite locally",
+        "SQLite is canonical for Aftermind",
+        "Aftermind stores memory in SQLite",
+        "SQLite powers Aftermind memory",
+        "Aftermind relies on SQLite storage",
+    ]
+    for text in statements[:-1]:
+        service.observe(_experience(text, scope))
+    assert document_store.get("projects/aftermind/knowledge") is None  # not yet, only 4 related so far
+
+    service.observe(_experience(statements[-1], scope))  # 5th related memory crosses the auto threshold
+
+    document = document_store.get("projects/aftermind/knowledge", scope=scope)
+    assert document is not None
+    assert "canonical local memory store" in document.to_markdown()
+
+
+def test_observe_does_not_auto_consolidate_plain_chat_below_threshold():
+    scope = MemoryScope.of(tenant_id="t1", project_id="aftermind")
+    document_store = FakeDocumentStore()
+    service = _service(ScriptedLLM(action="create"), document_store)
+
+    service.observe(_experience("Aftermind uses SQLite locally", scope))
+    service.observe(_experience("SQLite is canonical for Aftermind", scope))
+
+    assert document_store.get("projects/aftermind/knowledge") is None
+
+
+def test_observe_auto_consolidates_on_confirmed_decision_with_fewer_memories():
+    from domain.enums.event_type import EventType
+
+    scope = MemoryScope.of(tenant_id="t1", project_id="aftermind")
+    consolidation_response = json.dumps(
+        {
+            "content": "Aftermind switched canonical storage to PostgreSQL.",
+            "confidence": 0.9,
+            "reasoning": "Confirmed architecture decision.",
+        }
+    )
+    document_store = FakeDocumentStore()
+    service = _service(ScriptedLLM(action="create", consolidation_response=consolidation_response), document_store)
+
+    service.observe(_experience("Aftermind uses PostgreSQL for storage", scope))
+    service.observe(_experience("PostgreSQL is canonical for Aftermind", scope))
+    # Third, decision-confirming memory pushes this 3-memory cluster over the
+    # lower milestone bar (DEFAULT_MEMORY_COUNT_THRESHOLD) without needing 5.
+    service.observe(_experience("PostgreSQL is Aftermind's storage", scope, event_type=EventType.DECISION_CONFIRMED))
+
+    document = document_store.get("projects/aftermind/knowledge", scope=scope)
+    assert document is not None
+    assert "PostgreSQL" in document.to_markdown()
+
+
+def test_reconsolidation_updates_existing_page_instead_of_creating_a_new_one():
+    scope = MemoryScope.of(tenant_id="t1", project_id="aftermind")
+    first_consolidation = json.dumps(
+        {
+            "content": "SQLite is Aftermind's canonical local memory store.",
+            "confidence": 0.9,
+            "reasoning": "Five consistent statements.",
+        }
+    )
+    llm = ScriptedLLM(action="create", consolidation_response=first_consolidation)
+    document_store = FakeDocumentStore()
+    service = _service(llm, document_store)
+
+    statements = [
+        "Aftermind uses SQLite locally",
+        "SQLite is canonical for Aftermind",
+        "Aftermind stores memory in SQLite",
+        "SQLite powers Aftermind memory",
+        "Aftermind relies on SQLite storage",
+    ]
+    memories = [service.observe(_experience(text, scope)) for text in statements]
+    assert all(memories)
+
+    original = document_store.get("projects/aftermind/knowledge", scope=scope)
+    assert original is not None
+    original_topic = original.sections[0].heading
+    assert original.version == 1
+
+    # Now the team switches canonical storage — the first memory gets
+    # superseded, which should refresh the *same* page/section rather
+    # than minting a second document.
+    llm.action = "supersede"
+    llm.target_memory_id = memories[0].memory_id
+    llm.consolidation_response = json.dumps(
+        {
+            "content": "Aftermind switched canonical storage from SQLite to PostgreSQL.",
+            "confidence": 0.9,
+            "reasoning": "Storage migration confirmed.",
+        }
+    )
+    service.observe(_experience("Aftermind switched canonical storage from SQLite to PostgreSQL", scope))
+
+    updated = document_store.get("projects/aftermind/knowledge", scope=scope)
+    assert updated is not None
+    assert updated.slug == original.slug
+    assert len(document_store._docs) == 1  # never a second/duplicate page
+    assert updated.sections[0].heading == original_topic
+    assert "PostgreSQL" in updated.to_markdown()
+
+
+def test_recall_fuses_sqlite_neo4j_openknowledge_and_checkpoint_into_one_context():
+    """Milestone 5 acceptance scenario: billing switched Redis -> RabbitMQ,
+    RabbitMQ belongs to payments architecture, an OpenKnowledge page
+    documents billing architecture, and there's an active checkpoint on
+    billing worker migration. One recall() call should fuse all four
+    into one compact, labeled context — not four raw blobs."""
+    from domain.models.knowledge_document import KnowledgeDocument, KnowledgeSection
+
+    scope = MemoryScope.of(tenant_id="t1", project_id="billing")
+    document_store = FakeDocumentStore()
+    llm = ScriptedLLM(action="create")
+    service = _service(llm, document_store)
+
+    redis_memory = service.observe(_experience("Billing used Redis before", scope))
+    assert redis_memory is not None
+
+    llm.action = "supersede"
+    llm.target_memory_id = redis_memory.memory_id
+    rabbitmq_memory = service.observe(_experience("Billing now uses RabbitMQ", scope))
+    assert rabbitmq_memory is not None
+
+    service.graph_store.upsert_relationship("RabbitMQ", "part_of", "payments architecture", scope=scope.stable())
+
+    document_store.save(
+        KnowledgeDocument(
+            scope=scope.stable(),
+            slug=service._document_slug(scope.stable()),
+            title="Billing Knowledge",
+            sections=(KnowledgeSection(heading="Billing Architecture", body="Billing uses RabbitMQ for messaging."),),
+        )
+    )
+
+    service.checkpoint(scope=scope, goal="Migrate billing workers", current="migrating billing workers")
+
+    result = service.recall(
+        RecallQuery(scope=scope, text="What RabbitMQ setup are we using for billing and what are we working on?")
+    )
+
+    assert "Billing now uses RabbitMQ" in result.context  # current fact
+    assert "Billing used Redis before (superseded)" in result.context  # historical
+    assert "RabbitMQ -[part_of]-> payments architecture" in result.context  # relationship
+    assert "Billing Architecture" in result.context  # OpenKnowledge excerpt
+    assert "Migrate billing workers" in result.context  # checkpoint
+    # One package: every section present, not separate disjoint calls.
+    for heading in ("## Where you left off", "## Current facts", "## Recent history", "## Relationships", "## From company knowledge"):
+        assert heading in result.context

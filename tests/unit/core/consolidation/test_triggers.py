@@ -32,5 +32,6 @@ def test_all_trigger_reasons_exist():
         "memory_count",
         "milestone",
         "session_complete",
+        "stale_page",
         "manual",
     }

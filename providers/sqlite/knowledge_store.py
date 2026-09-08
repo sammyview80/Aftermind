@@ -63,6 +63,24 @@ class SqliteKnowledgeStore:
         ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
         return ranked[:limit]
 
+    def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        query_words = _words(query)
+
+        def overlap(memory: Memory) -> float:
+            memory_words = _words(memory.content)
+            if not query_words or not memory_words:
+                return 0.0
+            return len(query_words & memory_words) / len(query_words | memory_words)
+
+        with self._client.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE scope_key = ? AND superseded_by IS NOT NULL", (scope_key(scope),)
+            ).fetchall()
+
+        candidates = [_row_to_memory(row) for row in rows]
+        ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
+        return ranked[:limit]
+
     def get(self, memory_id: str) -> Optional[Memory]:
         with self._client.connect() as conn:
             row = conn.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,)).fetchone()

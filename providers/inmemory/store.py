@@ -39,6 +39,22 @@ class InMemoryKnowledgeStore:
         ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
         return ranked[:limit]
 
+    def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        query_words = _words(query)
+
+        def overlap(memory: Memory) -> float:
+            memory_words = _words(memory.content)
+            if not query_words or not memory_words:
+                return 0.0
+            return len(query_words & memory_words) / len(query_words | memory_words)
+
+        scope_key = _scope_key(scope)
+        candidates = [
+            m for m in self._memories.values() if m.superseded_by is not None and _scope_key(m.scope) == scope_key
+        ]
+        ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
+        return ranked[:limit]
+
     def get(self, memory_id: str) -> Optional[Memory]:
         return self._memories.get(memory_id)
 
@@ -55,7 +71,8 @@ class InMemoryKnowledgeStore:
 
 class InMemoryGraphStore:
     def __init__(self) -> None:
-        self._edges: list[tuple[str, str, str, str]] = []  # (source, relation, target, scope_key)
+        # (source, relation, target, scope_key, historical)
+        self._edges: list[tuple[str, str, str, str, bool]] = []
         self._entities: set[tuple[str, str]] = set()
 
     def upsert_entity(self, name: str, scope: Optional[MemoryScope] = None) -> None:
@@ -64,11 +81,49 @@ class InMemoryGraphStore:
     def upsert_relationship(
         self, source: str, relation: str, target: str, scope: Optional[MemoryScope] = None
     ) -> None:
-        self._edges.append((source, relation, target, _scope_key(scope)))
+        self._edges.append((source, relation, target, _scope_key(scope), False))
 
     def find_related(self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[str]:
         scope_key = _scope_key(scope)
-        return [t for s, _, t, sk in self._edges if s == entity and sk == scope_key][:limit]
+        entity_lower = entity.lower()
+        return [
+            t for s, _, t, sk, historical in self._edges if s.lower() == entity_lower and sk == scope_key and not historical
+        ][:limit]
+
+    def find_relationships(
+        self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5
+    ) -> list[tuple[str, str, str]]:
+        # Case-insensitive to match GraphitiStore's real behavior — entity
+        # seeds from recall planning are lowercased keywords, while
+        # entity names are stored with whatever casing they were
+        # extracted with.
+        scope_key = _scope_key(scope)
+        entity_lower = entity.lower()
+        return [
+            (s, r, t)
+            for s, r, t, sk, historical in self._edges
+            if s.lower() == entity_lower and sk == scope_key and not historical
+        ][:limit]
+
+    def mark_historical(
+        self, source: str, relation: str, target: str, scope: Optional[MemoryScope] = None
+    ) -> None:
+        scope_key = _scope_key(scope)
+        source_lower, target_lower = source.lower(), target.lower()
+        for i, (s, r, t, sk, historical) in enumerate(self._edges):
+            if s.lower() == source_lower and t.lower() == target_lower and r == relation and sk == scope_key:
+                self._edges[i] = (s, r, t, sk, True)
+
+    def find_historical_relationships(
+        self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5
+    ) -> list[tuple[str, str, str]]:
+        scope_key = _scope_key(scope)
+        entity_lower = entity.lower()
+        return [
+            (s, r, t)
+            for s, r, t, sk, historical in self._edges
+            if s.lower() == entity_lower and sk == scope_key and historical
+        ][:limit]
 
 
 class InMemoryCheckpointStore:

@@ -4,7 +4,13 @@ from core.checkpoints.manager import CheckpointManager
 from core.checkpoints.summarizer import LLMCheckpointSummarizer
 from core.consolidation.consolidator import LLMConsolidator
 from core.consolidation.planner import ConsolidationPlanner
-from core.consolidation.triggers import DEFAULT_MEMORY_COUNT_THRESHOLD, ConsolidationTrigger
+from core.consolidation.triggers import (
+    AUTO_CONSOLIDATION_MEMORY_THRESHOLD,
+    DEFAULT_MEMORY_COUNT_THRESHOLD,
+    DEFAULT_MILESTONE_TRIGGERS,
+    ConsolidationTrigger,
+    is_milestone_event,
+)
 from core.consolidation.validator import ConsolidationValidator
 from core.formation.candidate_extractor import CandidateExtractor
 from core.formation.evaluator import MemoryEvaluator
@@ -16,6 +22,7 @@ from core.recall.retriever import Retriever
 from core.reconciliation.evidence_retriever import EvidenceRetriever
 from core.reconciliation.reconciler import Reconciler
 from core.reconciliation.validator import Validator
+from domain.enums.memory_status import MemoryStatus
 from domain.interfaces.checkpoint_store import CheckpointStore
 from domain.interfaces.decision_store import DecisionStore
 from domain.interfaces.document_store import DocumentStore
@@ -40,7 +47,7 @@ from domain.models.scope import MemoryScope
 # cheap regex handles simple atomic sentences; compound/merged content
 # goes through LLMTripleExtractor instead of stretching the regex to
 # cover shapes it can't safely parse (see providers/graphiti/validation.py).
-from providers.graphiti.triple_extractor import LLMTripleExtractor, sync_to_graph
+from providers.graphiti.triple_extractor import LLMTripleExtractor, mark_stale_in_graph, sync_to_graph
 from providers.llm.base import load_prompt
 
 
@@ -116,30 +123,156 @@ class AftermindService:
         if memory is not None:
             self._lifecycle.get_or_create(memory)
             # If applying this decision superseded any evidence memory,
-            # archive that memory's lifecycle record (content untouched).
+            # archive that memory's lifecycle record (content untouched),
+            # and treat any OpenKnowledge page built from it as stale.
             for evidence_memory in evidence:
                 refreshed = self.knowledge_store.get(evidence_memory.memory_id)
                 if refreshed is not None and refreshed.superseded_by:
                     self._lifecycle.archive_superseded(refreshed)
+                    self._reconsolidate_stale_page(refreshed, memory.scope)
+                    mark_stale_in_graph(refreshed, self.graph_store, llm_extractor=self._triple_extractor)
             # StoredMemory -> entity/relationship extraction -> GraphStore.
             sync_to_graph(memory, self.graph_store, llm_extractor=self._triple_extractor)
 
         self._checkpoints.checkpoint_experience(experience, memory_ids=[memory.memory_id] if memory else [])
+
+        if memory is not None:
+            self._auto_consolidate(memory, experience)
+
         return memory
 
+    def _document_slug(self, scope: Optional[MemoryScope]) -> str:
+        project = (scope.get("project_id") if scope else None) or "default"
+        return f"projects/{project}/knowledge"
+
+    def _document_title(self, scope: Optional[MemoryScope]) -> str:
+        project = (scope.get("project_id") if scope else None) or "default"
+        return f"{project} Knowledge"
+
+    def _run_consolidation_plan(self, plan, slug: str, title: str) -> Optional[ConsolidationResult]:
+        candidate = self._consolidator.consolidate(plan)
+        result = self._consolidation_validator.validate(candidate)
+        return self._consolidator.apply(candidate, result, self._document_store, slug=slug, title=title)
+
+    def _auto_consolidate(self, memory: Memory, experience: Experience) -> None:
+        """Unsupervised knowledge promotion: after observe() commits a
+        memory, check whether a cluster it belongs to is now worth
+        writing/updating in OpenKnowledge. Deliberately conservative —
+        this is not run on every memory, only when one of the milestone
+        spec's conditions holds:
+          - 5+ related durable memories now cluster on one topic, or
+          - the triggering event is a confirmed decision / completed
+            task / agent handoff (checkpoint-worthy milestones).
+        Never fires on plain chat/tool-call noise, since those never
+        pass MemoryEvaluator.is_worth_remembering() to reach here as a
+        `memory` in the first place.
+        """
+        if self._document_store is None:
+            return
+
+        scope = memory.scope.stable() if memory.scope else None
+        is_milestone = any(is_milestone_event(e.event_type, DEFAULT_MILESTONE_TRIGGERS) for e in experience.events)
+
+        # A confirmed decision / completed task / handoff is itself a
+        # meaningful-enough signal that it doesn't need the full 5-memory
+        # bar the plain topic-threshold path requires — but it still
+        # needs more than a couple of memories to preserve real
+        # provenance, so it isn't fired by trivial one-off milestones.
+        min_group_size = DEFAULT_MEMORY_COUNT_THRESHOLD if is_milestone else AUTO_CONSOLIDATION_MEMORY_THRESHOLD
+        live_memories = self.knowledge_store.list_all(scope=scope)
+        planner = ConsolidationPlanner(min_group_size=min_group_size)
+        trigger = ConsolidationTrigger.MILESTONE if is_milestone else ConsolidationTrigger.TOPIC_THRESHOLD
+        plans = planner.plan(live_memories, trigger, scope=scope)
+
+        if is_milestone:
+            # A confirmed decision / completed task is a natural point to
+            # promote whatever topics are currently ready, not just the
+            # one this particular memory happens to belong to.
+            relevant_plans = plans
+        else:
+            relevant_plans = [p for p in plans if any(m.memory_id == memory.memory_id for m in p.memories)]
+
+        slug = self._document_slug(scope)
+        title = self._document_title(scope)
+        for plan in relevant_plans:
+            self._run_consolidation_plan(plan, slug, title)
+
+    def _reconsolidate_stale_page(self, superseded_memory: Memory, scope: Optional[MemoryScope]) -> None:
+        """A memory that fed into an OpenKnowledge section just got
+        superseded — if that section still exists, re-derive it from
+        current live memories and overwrite it in place, rather than
+        leaving stale content or minting architecture-2.md. No-op if no
+        document/section was ever built from this memory's topic."""
+        if self._document_store is None:
+            return
+
+        stable_scope = scope.stable() if scope else None
+        slug = self._document_slug(stable_scope)
+        document = self._document_store.get(slug, scope=stable_scope)
+        if document is None or superseded_memory.memory_id not in document.source_memory_ids:
+            return
+
+        existing_headings = {section.heading for section in document.sections}
+        if not existing_headings:
+            return
+
+        live_memories = self.knowledge_store.list_all(scope=stable_scope)
+        planner = ConsolidationPlanner(min_group_size=2)
+        plans = planner.plan(live_memories, ConsolidationTrigger.STALE_PAGE, scope=stable_scope)
+
+        for plan in plans:
+            if plan.topic in existing_headings:
+                self._run_consolidation_plan(plan, slug, document.title)
+
     def recall(self, query: RecallQuery) -> RecallResult:
-        """Reconstruct context for `query`: latest checkpoint + ranked
-        relevant memories + related entities, compressed into one block
-        of text. Retrieved memories are reinforced (lifecycle access)."""
+        """Hybrid recall: fuse SQLite (current + historical memories),
+        Neo4j/Graphiti (relationships), OpenKnowledge (consolidated
+        knowledge), and the latest checkpoint into one ranked, compact
+        context — not four raw blobs. Retrieved memories are reinforced
+        (lifecycle access)."""
+        stable_scope = query.scope.stable() if query.scope else None
         checkpoint = self._checkpoints.latest(query.scope)
         plan = self._recall_planner.plan(query, checkpoint)
         evidence = self._recall_retriever.retrieve(plan)
-        ranked = self._ranker.rank(plan.search_terms, list(evidence.memories), limit=query.limit)
+
+        statuses = {
+            memory.memory_id: self._lifecycle.status_of(memory.memory_id, scope=memory.scope)
+            for memory in evidence.memories
+        }
+        # Archived/expired/forgotten memories are excluded from *normal*
+        # recall entirely — same treatment as superseded ones — not just
+        # deprioritized by score. history() (via evidence.historical_memories)
+        # is the deliberate path for surfacing them when asked for.
+        _EXCLUDED_FROM_RECALL = frozenset({MemoryStatus.ARCHIVED, MemoryStatus.EXPIRED, MemoryStatus.FORGOTTEN})
+        recallable = [m for m in evidence.memories if statuses[m.memory_id] not in _EXCLUDED_FROM_RECALL]
+        ranked = self._ranker.rank(
+            plan.search_terms,
+            recallable,
+            limit=query.limit,
+            query_scope=stable_scope,
+            statuses=statuses,
+        )
 
         for memory in ranked:
             self._lifecycle.record_access(memory.memory_id, scope=memory.scope)
 
-        context = self._context_builder.build(checkpoint, ranked, evidence.related_entities)
+        knowledge_excerpts: tuple[str, ...] = ()
+        if self._document_store is not None and query.text:
+            documents = self._document_store.search(query.text, scope=stable_scope, limit=2)
+            knowledge_excerpts = tuple(
+                f"### {section.heading}\n{section.body}"
+                for document in documents
+                for section in document.sections
+            )
+
+        context = self._context_builder.build(
+            checkpoint,
+            ranked,
+            evidence.related_entities,
+            relationships=evidence.relationships,
+            historical_memories=evidence.historical_memories,
+            knowledge_excerpts=knowledge_excerpts,
+        )
 
         return RecallResult(
             query_id=query.query_id,
@@ -211,6 +344,13 @@ class AftermindService:
         """Direct memory search, without the full recall pipeline
         (no checkpoint, no ranking, no context compression)."""
         return self.knowledge_store.search(query, scope=scope.stable() if scope else None, limit=limit)
+
+    def run_lifecycle_maintenance(self, scope: Optional[MemoryScope] = None):
+        """Memory hygiene pass: decay every lifecycle record in scope and
+        archive the ones that came out fully stale and were never
+        recalled — not immediate deletion. Meant to be run periodically
+        (cron/scheduler), not on every observe()/recall() call."""
+        return self._lifecycle.run_hygiene_sweep(scope=scope.stable() if scope else None)
 
     def consolidate(
         self,

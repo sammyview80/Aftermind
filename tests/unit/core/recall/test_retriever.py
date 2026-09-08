@@ -13,7 +13,9 @@ class FakeKnowledgeStore:
 
     def search(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
         words = set(query.lower().split())
-        return [m for m in self._memories if words & set(m.content.lower().split())][:limit]
+        return [
+            m for m in self._memories if m.superseded_by is None and words & set(m.content.lower().split())
+        ][:limit]
 
     def get(self, memory_id: str) -> Optional[Memory]:
         return next((m for m in self._memories if m.memory_id == memory_id), None)
@@ -22,10 +24,17 @@ class FakeKnowledgeStore:
         self._memories.append(memory)
         return memory
 
+    def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        words = set(query.lower().split())
+        return [
+            m for m in self._memories if m.superseded_by is not None and words & set(m.content.lower().split())
+        ][:limit]
+
 
 class FakeGraphStore:
-    def __init__(self, related: dict[str, list[str]]) -> None:
+    def __init__(self, related: dict[str, list[str]], relationships: dict[str, list[tuple[str, str, str]]] = None) -> None:
         self._related = related
+        self._relationships = relationships or {}
 
     def upsert_entity(self, name: str, scope=None) -> None:
         pass
@@ -35,6 +44,9 @@ class FakeGraphStore:
 
     def find_related(self, entity: str, scope=None, limit: int = 5) -> list[str]:
         return self._related.get(entity, [])[:limit]
+
+    def find_relationships(self, entity: str, scope=None, limit: int = 5) -> list[tuple[str, str, str]]:
+        return self._relationships.get(entity, [])[:limit]
 
 
 def _plan(**overrides) -> RecallPlan:
@@ -82,3 +94,29 @@ def test_retrieve_with_no_plan_terms_returns_nothing():
 
     assert evidence.memories == ()
     assert evidence.related_entities == ()
+
+
+def test_retrieve_collects_relationships_across_seeds():
+    graph = FakeGraphStore(
+        related={},
+        relationships={"rabbitmq": [("RabbitMQ", "part_of", "payments architecture")]},
+    )
+    retriever = Retriever(FakeKnowledgeStore([]), graph)
+
+    plan = _plan(entity_seeds=("rabbitmq",))
+    evidence = retriever.retrieve(plan)
+
+    assert evidence.relationships == (("RabbitMQ", "part_of", "payments architecture"),)
+
+
+def test_retrieve_collects_historical_memories_excluding_live_ones():
+    live = Memory(content="Billing now uses RabbitMQ")
+    superseded = Memory(content="Billing used Redis before", superseded_by=live.memory_id)
+    store = FakeKnowledgeStore([live, superseded])
+    retriever = Retriever(store, FakeGraphStore({}))
+
+    plan = _plan(search_terms=("billing",))
+    evidence = retriever.retrieve(plan)
+
+    assert evidence.memories == (live,)
+    assert evidence.historical_memories == (superseded,)

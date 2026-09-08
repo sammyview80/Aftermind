@@ -139,7 +139,7 @@ def test_continue_aftermind_prioritizes_checkpoint_decisions_and_entities():
     assert recent_task in result.memories
     assert "reconciler" in result.related_entities
     assert "## Where you left off" in result.context
-    assert "## Relevant memories" in result.context
+    assert "## Current facts" in result.context
     assert "## Related entities" in result.context
 
 

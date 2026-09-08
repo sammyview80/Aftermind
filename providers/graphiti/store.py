@@ -48,11 +48,51 @@ class GraphitiStore:
         # extraction) lowercase entity seeds, while entity names stored
         # via add_fact keep the casing they were extracted with.
         records = self._client.run(
-            "MATCH (a:Entity)-[:RELATES_TO]->(b:Entity) "
-            "WHERE toLower(a.name) = toLower($name) AND a.group_id = $group_id "
+            "MATCH (a:Entity)-[rel:RELATES_TO]->(b:Entity) "
+            "WHERE toLower(a.name) = toLower($name) AND a.group_id = $group_id AND rel.expired_at IS NULL "
             "RETURN DISTINCT b.name AS name LIMIT $limit",
             name=entity,
             group_id=_scope_key(scope),
             limit=limit,
         )
         return [record["name"] for record in records]
+
+    def find_relationships(
+        self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5
+    ) -> list[tuple[str, str, str]]:
+        records = self._client.run(
+            "MATCH (a:Entity)-[rel:RELATES_TO]->(b:Entity) "
+            "WHERE toLower(a.name) = toLower($name) AND a.group_id = $group_id AND rel.expired_at IS NULL "
+            "RETURN DISTINCT a.name AS source, rel.name AS relation, b.name AS target LIMIT $limit",
+            name=entity,
+            group_id=_scope_key(scope),
+            limit=limit,
+        )
+        return [(record["source"], record["relation"] or "related_to", record["target"]) for record in records]
+
+    def mark_historical(
+        self, source: str, relation: str, target: str, scope: Optional[MemoryScope] = None
+    ) -> None:
+        self._client.run(
+            "MATCH (a:Entity)-[rel:RELATES_TO]->(b:Entity) "
+            "WHERE toLower(a.name) = toLower($source) AND toLower(b.name) = toLower($target) "
+            "AND rel.name = $relation AND a.group_id = $group_id AND rel.expired_at IS NULL "
+            "SET rel.expired_at = datetime()",
+            source=source,
+            target=target,
+            relation=relation,
+            group_id=_scope_key(scope),
+        )
+
+    def find_historical_relationships(
+        self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5
+    ) -> list[tuple[str, str, str]]:
+        records = self._client.run(
+            "MATCH (a:Entity)-[rel:RELATES_TO]->(b:Entity) "
+            "WHERE toLower(a.name) = toLower($name) AND a.group_id = $group_id AND rel.expired_at IS NOT NULL "
+            "RETURN DISTINCT a.name AS source, rel.name AS relation, b.name AS target LIMIT $limit",
+            name=entity,
+            group_id=_scope_key(scope),
+            limit=limit,
+        )
+        return [(record["source"], record["relation"] or "related_to", record["target"]) for record in records]
