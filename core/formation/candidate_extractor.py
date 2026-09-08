@@ -59,6 +59,8 @@ Return a JSON array of candidates (empty array if nothing meaningful):
 [{{"content": "...", "memory_type": "semantic|episodic|procedural", \
 "entities": ["..."], "relationships": ["..."], "user_confirmed": true|false|null, \
 "confidence": <0-1>}}]
+
+Respond with ONLY that JSON array — no prose, no markdown code fences.
 """
 
 

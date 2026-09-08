@@ -25,3 +25,16 @@ def test_parses_json_array():
 def test_raises_on_invalid_json():
     with pytest.raises(Exception):
         parse_json_response("not json at all")
+
+
+def test_repairs_missing_closing_quote_before_final_brace():
+    raw = '{"worth_remembering": true, "reasoning": "lacks context, confirmation, or specificity.}'
+    assert parse_json_response(raw) == {
+        "worth_remembering": True,
+        "reasoning": "lacks context, confirmation, or specificity.",
+    }
+
+
+def test_repairs_missing_closing_quote_before_final_bracket():
+    raw = '["a", "b]'
+    assert parse_json_response(raw) == ["a", "b"]

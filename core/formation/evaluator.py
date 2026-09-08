@@ -64,6 +64,8 @@ Return a single JSON object:
 {{"worth_remembering": true|false, "confidence": <0-1>, "future_usefulness": <0-1>, \
 "durability": <0-1>, "novelty": <0-1>, "impact": <0-1>, "specificity": <0-1>, \
 "memory_type": "semantic|episodic|procedural", "reasoning": "<one sentence>"}}
+
+Respond with ONLY that JSON object — no prose, no markdown code fences.
 """
 
 

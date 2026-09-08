@@ -27,6 +27,8 @@ Respond with a single JSON object:
 - "update": an existing memory is still correct but the candidate adds detail to it.
 - "merge": the candidate and an existing memory should be combined into one.
 - "supersede": the candidate contradicts an existing memory, which is now outdated.
+
+Respond with ONLY that JSON object — no prose, no markdown code fences.
 """
 
 
