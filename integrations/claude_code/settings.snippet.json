@@ -1,0 +1,53 @@
+{
+  "_comment": "Merge this `hooks` block into ~/.claude/settings.json (all projects) or .claude/settings.json (this project only). Replace /path/to/agent-memory with this repo's actual path — the hook command must cd there so `python3 -m integrations.claude_code` can import it, regardless of which project Claude Code itself is running in.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 5000 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 5000 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 10000 }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 10000 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 15000 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.claude_code", "timeout": 15000 }
+        ]
+      }
+    ]
+  }
+}

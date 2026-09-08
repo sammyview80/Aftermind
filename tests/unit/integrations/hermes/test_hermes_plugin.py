@@ -42,7 +42,7 @@ def test_recall_injects_context_on_hit(monkeypatch):
     assert result == {"context": "[Aftermind memory]\n- Aftermind uses SQLite locally"}
     assert captured["url"].endswith("/recall")
     assert captured["body"]["text"] == "What database does Aftermind use?"
-    assert captured["body"]["scope"]["levels"]["tenant_id"] == "hermes"
+    assert captured["body"]["scope"]["levels"]["tenant_id"] == "default"
 
 
 def test_recall_returns_none_on_empty_context(monkeypatch):
@@ -102,7 +102,7 @@ def test_observe_posts_to_observe_endpoint(monkeypatch):
     assert captured["url"].endswith("/observe")
     assert captured["body"]["output"] == "We decided Aftermind will use SQLite for local persistence."
     assert captured["body"]["event_type"] == "user_message"
-    assert captured["body"]["scope"]["levels"]["tenant_id"] == "hermes"
+    assert captured["body"]["scope"]["levels"]["tenant_id"] == "default"
 
 
 def test_observe_skips_empty_text(monkeypatch):
@@ -225,8 +225,8 @@ def test_derive_scope_uses_git_root_basename_as_project_id(tmp_path, monkeypatch
     scope = _derive_scope()
 
     assert scope["project_id"] == "my-project"
-    assert scope["tenant_id"] == "hermes"
-    assert scope["agent_id"] == "hermes"
+    assert scope["tenant_id"] == "default"
+    assert "agent_id" not in scope  # deliberately unset by default — see _derive_scope's docstring
     assert "session_id" not in scope
 
 

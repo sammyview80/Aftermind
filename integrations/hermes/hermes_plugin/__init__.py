@@ -71,18 +71,32 @@ def _derive_scope(session_id: str | None = None) -> dict:
     not a fixed env-var project name — so opening Aftermind's repo vs.
     some other repo under the same Hermes profile never shares a scope.
     Explicit env-var overrides always win, for cases with no git repo or
-    where the derived name isn't what's wanted."""
+    where the derived name isn't what's wanted.
+
+    `tenant_id` defaults to "default" (not "hermes") and `agent_id` is
+    left unset by default (not "hermes") — MemoryScope keys on every
+    level it's given, so framework-named defaults here would silently
+    wall Hermes's memories off from any other framework adapter (e.g.
+    Claude Code's) even for the same project. Durable project/repo
+    memory is meant to be shared across whichever agent/framework wrote
+    it; agent_id is for isolating individual agents *within* one
+    framework, an opt-in via AFTERMIND_SCOPE_AGENT. See
+    integrations/claude_code/scope_mapper.py, which follows the same
+    rule for the same reason, and the cross-framework acceptance test
+    (Hermes writes, Claude Code recalls)."""
     cwd = os.getcwd()
     project_root = _git_root(cwd) or cwd
 
     scope = {
-        "tenant_id": os.environ.get("AFTERMIND_SCOPE_TENANT", "hermes"),
-        "agent_id": os.environ.get("AFTERMIND_SCOPE_AGENT", "hermes"),
+        "tenant_id": os.environ.get("AFTERMIND_SCOPE_TENANT", "default"),
         "project_id": os.environ.get("AFTERMIND_SCOPE_PROJECT")
         or os.path.basename(project_root.rstrip("/"))
         or "default",
         "repository_id": os.environ.get("AFTERMIND_SCOPE_REPOSITORY") or project_root,
     }
+    agent_id = os.environ.get("AFTERMIND_SCOPE_AGENT")
+    if agent_id:
+        scope["agent_id"] = agent_id
     if session_id:
         scope["session_id"] = session_id
     return scope
