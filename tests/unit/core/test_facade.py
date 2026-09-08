@@ -405,3 +405,66 @@ def test_recall_fuses_sqlite_neo4j_openknowledge_and_checkpoint_into_one_context
     # One package: every section present, not separate disjoint calls.
     for heading in ("## Where you left off", "## Current facts", "## Recent history", "## Relationships", "## From company knowledge"):
         assert heading in result.context
+
+
+def test_milestone_6_supersede_updates_lifecycle_graph_and_recall():
+    """Acceptance scenario: SQLite -> superseded, PostgreSQL -> active.
+    Normal recall returns PostgreSQL only; the superseded fact and its
+    graph relationship are preserved as history, not deleted."""
+    scope = MemoryScope.of(tenant_id="t1", project_id="aftermind")
+    llm = ScriptedLLM(action="create")
+    service = _service(llm)
+
+    sqlite_memory = service.observe(_experience("Aftermind uses SQLite", scope))
+    assert sqlite_memory is not None
+
+    # Recall it a few times before it's superseded -> reinforced.
+    for _ in range(3):
+        service.recall(RecallQuery(scope=scope, text="What database does Aftermind use?"))
+    lifecycle_before = service._lifecycle._store.get(sqlite_memory.memory_id, scope=scope.stable())
+    assert lifecycle_before.access_count >= 3
+
+    llm.action = "supersede"
+    llm.target_memory_id = sqlite_memory.memory_id
+    postgres_memory = service.observe(_experience("Aftermind uses PostgreSQL", scope))
+    assert postgres_memory is not None
+
+    stale_lifecycle = service._lifecycle._store.get(sqlite_memory.memory_id, scope=scope.stable())
+    assert stale_lifecycle.status.value == "archived"
+
+    # Normal recall: current fact only, PostgreSQL.
+    current = service.recall(RecallQuery(scope=scope, text="What database does Aftermind use?"))
+    assert "PostgreSQL" in current.context
+    assert all(m.memory_id != sqlite_memory.memory_id for m in current.memories)
+
+    # Historical question: SQLite still answerable via history.
+    historical = service.recall(RecallQuery(scope=scope, text="What database did Aftermind previously use?"))
+    assert "Aftermind uses SQLite" in historical.context
+    assert "(superseded)" in historical.context
+
+    # Neo4j: the old relationship is preserved but marked historical,
+    # not surfaced by the normal (current) relationship lookup.
+    stable_scope = scope.stable()
+    current_rels = service.graph_store.find_relationships("Aftermind", scope=stable_scope)
+    historical_rels = service.graph_store.find_historical_relationships("Aftermind", scope=stable_scope)
+    assert any(target == "PostgreSQL" for _, _, target in current_rels)
+    assert all(target != "SQLite" for _, _, target in current_rels)
+    assert any(target == "SQLite" for _, _, target in historical_rels)
+
+
+def test_archived_memory_is_excluded_from_normal_recall():
+    scope = MemoryScope.of(tenant_id="t1")
+    service = _service(ScriptedLLM(action="create"))
+    memory = service.observe(_experience("Old fact nobody asked about again", scope))
+    assert memory is not None
+
+    from domain.enums.memory_status import MemoryStatus
+
+    lifecycle = service._lifecycle._store.get(memory.memory_id, scope=scope.stable())
+    from dataclasses import replace
+
+    service._lifecycle._store.save(replace(lifecycle, status=MemoryStatus.ARCHIVED))
+
+    result = service.recall(RecallQuery(scope=scope, text="Old fact nobody asked about again"))
+
+    assert all(m.memory_id != memory.memory_id for m in result.memories)

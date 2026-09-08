@@ -106,3 +106,56 @@ def test_cascade_provenance_cleans_documents_and_memories():
 
     assert documents[0].source_memory_ids == ("m2",)
     assert memories[0].superseded_by is None
+
+
+def test_status_of_defaults_to_active_when_no_lifecycle_record_exists():
+    manager = LifecycleManager(FakeLifecycleStore())
+    assert manager.status_of("never-seen") == MemoryStatus.ACTIVE
+
+
+def test_status_of_returns_the_recorded_status():
+    store = FakeLifecycleStore()
+    store.save(MemoryLifecycle(memory_id="m1", status=MemoryStatus.DECAYED))
+    manager = LifecycleManager(store)
+
+    assert manager.status_of("m1") == MemoryStatus.DECAYED
+
+
+def test_run_hygiene_sweep_archives_expired_and_never_accessed_memories():
+    store = FakeLifecycleStore()
+    # Old, never touched -> decays all the way to EXPIRED -> archived.
+    store.save(MemoryLifecycle(memory_id="stale", created_at=datetime.now(timezone.utc) - timedelta(days=2000)))
+    manager = LifecycleManager(store)
+
+    results = manager.run_hygiene_sweep()
+
+    assert results[0].status == MemoryStatus.ARCHIVED
+    assert store.get("stale").status == MemoryStatus.ARCHIVED
+    assert "decayed_unused" in store.get("stale").metadata["archived_reason"]
+
+
+def test_run_hygiene_sweep_does_not_archive_expired_memories_that_were_ever_accessed():
+    store = FakeLifecycleStore()
+    old_but_used = MemoryLifecycle(
+        memory_id="used",
+        created_at=datetime.now(timezone.utc) - timedelta(days=2000),
+        access_count=3,
+        last_accessed_at=datetime.now(timezone.utc) - timedelta(days=2000),
+    )
+    store.save(old_but_used)
+    manager = LifecycleManager(store)
+
+    results = manager.run_hygiene_sweep()
+
+    assert results[0].status == MemoryStatus.EXPIRED  # decayed fully, but not archived
+    assert store.get("used").status == MemoryStatus.EXPIRED
+
+
+def test_run_hygiene_sweep_leaves_fresh_memories_active():
+    store = FakeLifecycleStore()
+    store.save(MemoryLifecycle(memory_id="fresh"))
+    manager = LifecycleManager(store)
+
+    results = manager.run_hygiene_sweep()
+
+    assert results[0].status == MemoryStatus.ACTIVE

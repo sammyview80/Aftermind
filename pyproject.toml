@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+python_files = [
+    "test_*.py",
+    "*_test.py",
+    "recall_accuracy.py",
+    "cross_session_continuity.py",
+    "checkpoint_resume.py",
+    "project_isolation.py",
+    "consolidation_quality.py",
+    "context_budget.py",
+]
