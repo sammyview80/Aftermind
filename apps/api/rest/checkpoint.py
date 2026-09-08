@@ -25,6 +25,13 @@ class LatestCheckpointRequest(BaseModel):
     scope: ScopeRequest = ScopeRequest()
 
 
+class CheckpointFromTextRequest(BaseModel):
+    scope: ScopeRequest = ScopeRequest()
+    text: str = ""
+    memory_ids: list[str] = []
+    reason: str = "session_end"
+
+
 class CheckpointResponse(BaseModel):
     found: bool
     checkpoint_id: Optional[str] = None
@@ -71,6 +78,24 @@ def latest_checkpoint(
     request: LatestCheckpointRequest, service: AftermindService = Depends(get_service)
 ) -> CheckpointResponse:
     checkpoint = service.latest_checkpoint(scope=request.scope.to_domain())
+    if checkpoint is None:
+        return CheckpointResponse(found=False)
+    return _to_response(checkpoint)
+
+
+@router.post("/checkpoint/from-text", response_model=CheckpointResponse)
+def checkpoint_from_text(
+    request: CheckpointFromTextRequest, service: AftermindService = Depends(get_service)
+) -> CheckpointResponse:
+    """Automatic checkpoint from freeform conversation text — an LLM
+    structures it into goal/completed/current/blockers/next_steps.
+    Used by the Hermes plugin on session end/reset/finalize."""
+    checkpoint = service.checkpoint_from_text(
+        scope=request.scope.to_domain(),
+        text=request.text,
+        memory_ids=request.memory_ids,
+        reason=request.reason,
+    )
     if checkpoint is None:
         return CheckpointResponse(found=False)
     return _to_response(checkpoint)

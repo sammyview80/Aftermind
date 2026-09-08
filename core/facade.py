@@ -1,6 +1,7 @@
 from typing import Iterable, Optional
 
 from core.checkpoints.manager import CheckpointManager
+from core.checkpoints.summarizer import LLMCheckpointSummarizer
 from core.consolidation.consolidator import LLMConsolidator
 from core.consolidation.planner import ConsolidationPlanner
 from core.consolidation.triggers import DEFAULT_MEMORY_COUNT_THRESHOLD, ConsolidationTrigger
@@ -82,6 +83,7 @@ class AftermindService:
 
         self._checkpoints = CheckpointManager(checkpoint_store)
         self._lifecycle = LifecycleManager(lifecycle_store)
+        self._checkpoint_summarizer = LLMCheckpointSummarizer(llm_provider, system_prompt=load_prompt("checkpoint"))
 
         self._consolidator = LLMConsolidator(llm_provider, system_prompt=load_prompt("consolidator"))
         self._consolidation_validator = ConsolidationValidator()
@@ -167,6 +169,37 @@ class AftermindService:
             completed=completed,
             blockers=blockers,
             next_steps=next_steps,
+            memory_ids=memory_ids,
+            reason=reason,
+        )
+
+    def checkpoint_from_text(
+        self,
+        scope: Optional[MemoryScope] = None,
+        text: str = "",
+        memory_ids: Iterable[str] = (),
+        reason: str = "session_end",
+    ) -> Optional[Checkpoint]:
+        """Automatic checkpoint from freeform conversation text (e.g. a
+        Hermes session ending) — LLMCheckpointSummarizer structures it
+        into goal/completed/current/blockers/next_steps first, using the
+        latest checkpoint's goal as continuity context, so a session
+        that only reports progress on an existing goal doesn't lose it.
+        Returns None for empty/whitespace-only text (nothing to summarize)."""
+        if not text or not text.strip():
+            return None
+
+        previous = self._checkpoints.latest(scope)
+        experience = Experience(scope=scope, input=text, output=text)
+        summary = self._checkpoint_summarizer.summarize(experience, previous_goal=previous.goal if previous else "")
+
+        return self._checkpoints.create(
+            scope=scope,
+            goal=summary.goal,
+            current=summary.current,
+            completed=summary.completed,
+            blockers=summary.blockers,
+            next_steps=summary.next_steps,
             memory_ids=memory_ids,
             reason=reason,
         )

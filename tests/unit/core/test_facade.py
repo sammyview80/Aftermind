@@ -12,10 +12,13 @@ from providers.inmemory.store import (
 
 
 class ScriptedLLM:
-    def __init__(self, action: str = "create", target_memory_id=None, consolidation_response=None) -> None:
+    def __init__(
+        self, action: str = "create", target_memory_id=None, consolidation_response=None, checkpoint_response=None
+    ) -> None:
         self.action = action
         self.target_memory_id = target_memory_id
         self.consolidation_response = consolidation_response
+        self.checkpoint_response = checkpoint_response
 
     def complete(self, prompt: str) -> str:
         if "EXISTING MEMORIES:" in prompt:
@@ -28,6 +31,10 @@ class ScriptedLLM:
             if self.consolidation_response is None:
                 raise AssertionError("unexpected consolidation call")
             return self.consolidation_response
+        if "PREVIOUS CHECKPOINT" in prompt:
+            if self.checkpoint_response is None:
+                raise AssertionError("unexpected checkpoint-summarizer call")
+            return self.checkpoint_response
         raise AssertionError(f"unexpected prompt: {prompt[:60]!r}")
 
 
@@ -179,3 +186,51 @@ def test_consolidate_below_threshold_produces_no_results():
     service.observe(_experience("Client prefers dark layouts", scope))
 
     assert service.consolidate(scope=scope, min_group_size=3) == []
+
+
+def test_checkpoint_from_text_summarizes_freeform_conversation():
+    scope = MemoryScope.of(tenant_id="t1", session_id="s1")
+    checkpoint_response = json.dumps(
+        {
+            "goal": "Integrate OpenKnowledge",
+            "completed": ["SQLite integration", "Neo4j integration"],
+            "current": "Wiring automatic checkpointing",
+            "blocked_by": [],
+            "next_steps": ["Wire automatic checkpointing"],
+        }
+    )
+    service = _service(ScriptedLLM(checkpoint_response=checkpoint_response))
+
+    checkpoint = service.checkpoint_from_text(
+        scope=scope,
+        text="We finished SQLite and Neo4j integration. Next we need to wire automatic checkpointing.",
+    )
+
+    assert checkpoint.goal == "Integrate OpenKnowledge"
+    assert checkpoint.completed == ("SQLite integration", "Neo4j integration")
+    assert checkpoint.next_steps == ("Wire automatic checkpointing",)
+    assert service.latest_checkpoint(scope) is checkpoint
+
+
+def test_checkpoint_from_text_returns_none_for_empty_text():
+    service = _service(ScriptedLLM())
+    assert service.checkpoint_from_text(scope=MemoryScope.of(tenant_id="t1"), text="") is None
+    assert service.checkpoint_from_text(scope=MemoryScope.of(tenant_id="t1"), text="   ") is None
+
+
+def test_checkpoint_from_text_uses_previous_goal_as_continuity_context():
+    scope = MemoryScope.of(tenant_id="t1")
+    service = _service(ScriptedLLM())
+    service.checkpoint(scope=scope, goal="Integrate OpenKnowledge")
+
+    seen_prompts = []
+    original_complete = service._checkpoint_summarizer._llm.complete
+
+    def capturing_complete(prompt):
+        seen_prompts.append(prompt)
+        return json.dumps({"goal": "Integrate OpenKnowledge", "completed": [], "current": "x", "blocked_by": [], "next_steps": []})
+
+    service._checkpoint_summarizer._llm.complete = capturing_complete
+    service.checkpoint_from_text(scope=scope, text="Still working on it.")
+
+    assert "Integrate OpenKnowledge" in seen_prompts[0]

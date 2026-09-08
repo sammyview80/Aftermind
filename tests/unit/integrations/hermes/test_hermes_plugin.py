@@ -1,9 +1,21 @@
+import subprocess
 import time
 
 import httpx
 import pytest
 
-from integrations.hermes.hermes_plugin import observe, observe_async, observe_tool_result, observe_turn, recall
+from integrations.hermes.hermes_plugin import (
+    _derive_scope,
+    _git_root,
+    on_session_end,
+    on_session_finalize,
+    on_session_reset,
+    observe,
+    observe_async,
+    observe_tool_result,
+    observe_turn,
+    recall,
+)
 
 
 def _client_with(monkeypatch, handler):
@@ -71,7 +83,9 @@ def test_recall_uses_env_config(monkeypatch):
     recall(session_id="s1", user_message="hi", is_first_turn=True)
 
     assert captured["url"] == "http://example.com:9000/recall"
-    assert captured["body"]["scope"]["levels"] == {"tenant_id": "acme", "project_id": "widgets"}
+    levels = captured["body"]["scope"]["levels"]
+    assert levels["tenant_id"] == "acme"
+    assert levels["project_id"] == "widgets"
 
 
 def test_observe_posts_to_observe_endpoint(monkeypatch):
@@ -180,4 +194,130 @@ def test_observe_tool_result_tolerates_missing_fields(monkeypatch):
 
     assert seen[0]["output"] == "Tool unknown_tool result: None"
     assert seen[0]["event_type"] == "tool_completed"
+
+
+def _init_git_repo(path):
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+
+
+def test_git_root_finds_repo_root(tmp_path):
+    _init_git_repo(tmp_path)
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+
+    # macOS tmp dirs are often symlinked (/tmp -> /private/tmp); compare
+    # resolved paths so this isn't flaky about the symlink form.
+    import pathlib
+
+    assert pathlib.Path(_git_root(str(nested))).resolve() == tmp_path.resolve()
+
+
+def test_git_root_returns_none_outside_a_repo(tmp_path):
+    assert _git_root(str(tmp_path)) is None
+
+
+def test_derive_scope_uses_git_root_basename_as_project_id(tmp_path, monkeypatch):
+    repo = tmp_path / "my-project"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr("os.getcwd", lambda: str(repo))
+
+    scope = _derive_scope()
+
+    assert scope["project_id"] == "my-project"
+    assert scope["tenant_id"] == "hermes"
+    assert scope["agent_id"] == "hermes"
+    assert "session_id" not in scope
+
+
+def test_derive_scope_falls_back_to_cwd_outside_a_repo(tmp_path, monkeypatch):
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.setattr("os.getcwd", lambda: str(outside))
+
+    scope = _derive_scope()
+
+    assert scope["project_id"] == "not-a-repo"
+
+
+def test_derive_scope_env_overrides_win_over_derived_values(tmp_path, monkeypatch):
+    repo = tmp_path / "real-repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setattr("os.getcwd", lambda: str(repo))
+    monkeypatch.setenv("AFTERMIND_SCOPE_PROJECT", "overridden-project")
+
+    assert _derive_scope()["project_id"] == "overridden-project"
+
+
+def test_derive_scope_includes_session_id_when_given(tmp_path, monkeypatch):
+    monkeypatch.setattr("os.getcwd", lambda: str(tmp_path))
+    assert _derive_scope(session_id="s1")["session_id"] == "s1"
+
+
+def test_derive_scope_isolates_different_repos(tmp_path, monkeypatch):
+    repo_a = tmp_path / "aftermind"
+    repo_b = tmp_path / "aglack"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    _init_git_repo(repo_a)
+    _init_git_repo(repo_b)
+
+    monkeypatch.setattr("os.getcwd", lambda: str(repo_a))
+    scope_a = _derive_scope()
+    monkeypatch.setattr("os.getcwd", lambda: str(repo_b))
+    scope_b = _derive_scope()
+
+    assert scope_a["project_id"] != scope_b["project_id"]
+    assert scope_a["repository_id"] != scope_b["repository_id"]
+
+
+def test_on_session_end_checkpoints_the_last_observed_turn(monkeypatch):
+    checkpoint_calls = []
+
+    def handler(url, json):
+        if url.endswith("/checkpoint/from-text"):
+            checkpoint_calls.append(json)
+        return httpx.Response(200, json={"found": True, "goal": "x"})
+
+    _client_with(monkeypatch, handler)
+    observe_turn(session_id="s1", user_message="We finished X.", assistant_response="Noted.")
+
+    on_session_end(session_id="s1")
+    time.sleep(0.2)
+
+    assert len(checkpoint_calls) == 1
+    body = checkpoint_calls[0]
+    assert "We finished X." in body["text"]
+    assert "Noted." in body["text"]
+    assert body["reason"] == "session_end"
+
+
+def test_session_end_then_finalize_does_not_double_checkpoint(monkeypatch):
+    checkpoint_calls = []
+
+    def handler(url, json):
+        if url.endswith("/checkpoint/from-text"):
+            checkpoint_calls.append(json)
+        return httpx.Response(200, json={})
+
+    _client_with(monkeypatch, handler)
+
+    observe_turn(session_id="s1", user_message="We finished X.", assistant_response="Noted.")
+    on_session_end(session_id="s1")
+    time.sleep(0.2)
+    on_session_finalize(session_id="s1")
+    time.sleep(0.2)
+
+    assert len(checkpoint_calls) == 1  # second flush found nothing pending, no-op
+
+
+def test_session_end_with_nothing_observed_is_a_noop(monkeypatch):
+    calls = []
+    _client_with(monkeypatch, lambda url, json: calls.append(json) or httpx.Response(200, json={}))
+
+    on_session_reset(session_id="never-had-a-turn")
+    time.sleep(0.2)
+
+    assert calls == []
 

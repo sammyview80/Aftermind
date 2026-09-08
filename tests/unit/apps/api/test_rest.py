@@ -110,6 +110,16 @@ class RoutingScriptedLLM:
                     "reasoning": "Consistent pattern.",
                 }
             )
+        if "PREVIOUS CHECKPOINT" in prompt:
+            return json.dumps(
+                {
+                    "goal": "Integrate OpenKnowledge",
+                    "completed": ["SQLite integration", "Neo4j integration"],
+                    "current": "Wiring automatic checkpointing",
+                    "blocked_by": [],
+                    "next_steps": ["Wire automatic checkpointing"],
+                }
+            )
         if "EXISTING MEMORIES:" in prompt:
             return json.dumps({"action": "create", "target_memory_id": None, "confidence": 0.9, "reasoning": "x"})
         return "[]"
@@ -142,3 +152,43 @@ def test_consolidate_writes_to_document_store():
         assert body["consolidated"][0]["document_slug"] == "client-prefs"
     finally:
         app.dependency_overrides[get_service] = original_override
+
+
+def test_checkpoint_from_text_summarizes_freeform_text():
+    checkpoint_service = AftermindService(
+        knowledge_store=InMemoryKnowledgeStore(),
+        graph_store=InMemoryGraphStore(),
+        checkpoint_store=InMemoryCheckpointStore(),
+        lifecycle_store=InMemoryLifecycleStore(),
+        llm_provider=RoutingScriptedLLM(),
+    )
+    original_override = app.dependency_overrides[get_service]
+    app.dependency_overrides[get_service] = lambda: checkpoint_service
+    try:
+        scope = {"tenant_id": "checkpoint-rest"}
+        response = client.post(
+            "/checkpoint/from-text",
+            json={
+                "scope": {"levels": scope},
+                "text": "We finished SQLite and Neo4j integration. Next we need to wire automatic checkpointing.",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["found"] is True
+        assert body["goal"] == "Integrate OpenKnowledge"
+        assert body["next_steps"] == ["Wire automatic checkpointing"]
+
+        latest = client.post("/checkpoint/latest", json={"scope": {"levels": scope}})
+        assert latest.json()["found"] is True
+        assert latest.json()["goal"] == "Integrate OpenKnowledge"
+    finally:
+        app.dependency_overrides[get_service] = original_override
+
+
+def test_checkpoint_from_text_empty_text_returns_not_found():
+    response = client.post(
+        "/checkpoint/from-text", json={"scope": {"levels": {"tenant_id": "checkpoint-rest-empty"}}, "text": ""}
+    )
+    assert response.status_code == 200
+    assert response.json()["found"] is False
