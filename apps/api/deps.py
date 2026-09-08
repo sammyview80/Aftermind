@@ -7,7 +7,7 @@ from core.observability import trace
 from core.observability.logging_setup import configure_logging
 from core.sync.worker import SyncWorker
 from providers.inmemory.store import InMemoryGraphStore
-from providers.llm.openrouter import OpenRouterProvider
+from providers.llm.factory import build_llm_provider
 from providers.sqlite.checkpoint_store import SqliteCheckpointStore
 from providers.sqlite.client import SqliteClient
 from providers.sqlite.decision_store import SqliteDecisionStore
@@ -20,17 +20,18 @@ _LOG = logging.getLogger("aftermind.api")
 
 
 class _LazyLLMProvider:
-    """Defers OpenRouterProvider construction (and its LLM_API_KEY/
-    LLM_MODEL validation) until the first `.complete()` call, so routes
-    that never touch the LLM (health, recall, checkpoint, search) don't
-    require an API key to be configured."""
+    """Defers provider construction (and its credential validation) until
+    the first `.complete()` call, so routes that never touch the LLM
+    (health, recall, checkpoint, search) don't require credentials.
+    Which provider is built follows LLM_PROVIDER (providers/llm/factory.py):
+    an OpenAI-compatible key, the Codex CLI login, or the Claude Code login."""
 
     def __init__(self) -> None:
         self._provider = None
 
     def complete(self, prompt: str) -> str:
         if self._provider is None:
-            self._provider = OpenRouterProvider()
+            self._provider = build_llm_provider()
         return self._provider.complete(prompt)
 
 

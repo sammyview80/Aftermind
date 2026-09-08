@@ -27,7 +27,20 @@ git clone https://github.com/sammyview80/Aftermind.git && cd Aftermind
 ./scripts/setup.sh                # venv, install, .env, Neo4j, OpenKnowledge, SQLite, API (background)
 ```
 
-Then put an LLM key in `.env` (`LLM_API_KEY`, `LLM_MODEL`; any OpenAI-compatible endpoint, OpenRouter by default). Recall works without it; learning (`observe`) needs it.
+On first run it asks which LLM to use for reconciliation, and offers what is already on your machine instead of asking for a new key:
+
+```
+Found credentials on this machine:
+  → 1. Codex CLI login (ChatGPT: you@example.com)      ~/.codex/auth.json
+    2. Claude Code login (Claude subscription)         macOS Keychain
+    3. OpenRouter API key                              ~/.hermes/.env OPENROUTER_API_KEY
+    4. Enter a new API key (any OpenAI-compatible endpoint)
+    5. Skip for now (recall works, observe() will not learn)
+```
+
+Pick one, pick a model (the Codex option shows your account's live catalog), and it runs a one-line test call before saving `LLM_PROVIDER` / `LLM_MODEL` to `.env`. Re-run any time with `aftermind init`, or non-interactively: `aftermind init --provider codex_oauth --model gpt-5.5`, or `aftermind init -y` to take the first detected login. OAuth tokens are read from the other tool's files and refreshed into `~/.aftermind/credentials.json`; Aftermind never writes into `~/.codex` or `~/.claude`.
+
+Recall works without any LLM; learning (`observe`) needs one.
 
 ```bash
 .venv/bin/aftermind status        # what is running, /health/ready
@@ -74,6 +87,7 @@ REST: `/observe`, `/recall`, `/search`, `/checkpoint`, `/checkpoint/latest`, `/c
 ## Operating it
 
 ```bash
+aftermind init             # choose/switch the LLM (reuse Codex, Claude Code, OpenRouter logins)
 aftermind serve            # API + in-process sync worker (what `up` runs)
 aftermind worker           # outbox sync worker as its own process
 aftermind sync status      # graph/document sync backlog; `sync run`, `sync retry [ID]`

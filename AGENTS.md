@@ -36,6 +36,10 @@ cp .env.example .env           # fill in real values, never commit .env
 
 `.env` keys: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (OpenRouter-compatible), `DATABASE_PATH`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_TIMEOUT_SECONDS`, `OPENKNOWLEDGE_URL`, plus the `AFTERMIND_*` reliability/logging knobs documented in `.env.example`. All of them are read in exactly one place: `apps/api/settings.py::Settings.from_env()` — never `os.environ` elsewhere in `apps/`.
 
+## LLM credentials
+
+`providers/llm/factory.py` builds the provider from `LLM_PROVIDER`: `openai_compatible` (key + base URL), `codex_oauth` (Codex CLI's ChatGPT login via `chatgpt.com/backend-api/codex`), `claude_code_oauth` (Claude Code login via Anthropic Messages + OAuth betas). `providers/llm/credentials.py` discovers what exists on the machine (read-only); `apps/setup/llm_setup.py` is the interactive picker behind `aftermind init`. Refreshed OAuth tokens go to `~/.aftermind/credentials.json` (0600), never back into `~/.codex/auth.json` or `~/.claude` — those files belong to the CLIs and their refresh tokens rotate. Header/refresh contracts were taken from the Codex CLI and Hermes implementations; keep them in sync if either changes (ChatGPT accounts reject the public-API `-mini` slugs, use the live catalog).
+
 ## Reliability rules (SQLite canonical, outbox for the rest)
 
 - `core/facade.py::observe()` commits memory + lifecycle + decision + checkpoint + `sync_jobs` rows in one `UnitOfWork` transaction (`SqliteClient.transaction()`), then flushes the jobs through `core/sync/dispatcher.py`.

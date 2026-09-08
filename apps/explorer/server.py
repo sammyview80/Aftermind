@@ -79,6 +79,21 @@ def _memory_row(row: sqlite3.Row, lifecycle: Optional[sqlite3.Row]) -> dict:
     }
 
 
+_HIERARCHY = (
+    "tenant_id", "workspace_id", "project_id", "repository_id", "user_id",
+    "agent_id", "task_id", "conversation_id", "session_id", "run_id",
+)
+
+
+def _parse_scope_key(key: str) -> dict:
+    """MemoryScope.key()'s inverse: ":"-joined, "*" for unset levels, in
+    domain/policies/scope_policy.DEFAULT_HIERARCHY order. Traces (unlike
+    memories/checkpoints) keep the full non-stable scope, so this is the
+    only place session_id/run_id are ever visible."""
+    parts = key.split(":") if key else []
+    return {name: (parts[i] if i < len(parts) and parts[i] != "*" else None) for i, name in enumerate(_HIERARCHY)}
+
+
 # ---------------------------------------------------------------- scopes
 
 @app.get("/api/scopes")
@@ -152,27 +167,68 @@ def overview(scope_key: Optional[str] = None):
 # ------------------------------------------------------------ memory ledger
 
 @app.get("/api/memories")
-def list_memories(scope_key: Optional[str] = None, status: Optional[str] = None, limit: int = 200):
+def list_memories(
+    scope_key: Optional[str] = None,
+    status: Optional[str] = None,
+    memory_type: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 25,
+):
+    """Filtered + paginated over the full table in SQL (not just the
+    fetched page), so `total`/`total_pages` reflect the real filtered
+    count regardless of page_size."""
     where_clauses = []
     params: list = []
     if scope_key:
         where_clauses.append("m.scope_key = ?")
         params.append(scope_key)
+    if memory_type:
+        where_clauses.append("m.memory_type = ?")
+        params.append(memory_type)
+    if search:
+        where_clauses.append("m.content LIKE ?")
+        params.append(f"%{search}%")
     where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-    with _db() as con:
-        rows = con.execute(
-            f"SELECT m.* FROM memories m {where} ORDER BY m.updated_at DESC LIMIT ?", (*params, limit)
-        ).fetchall()
-        lifecycle_by_id = {
-            r["memory_id"]: r
-            for r in con.execute("SELECT * FROM lifecycle").fetchall()
-        }
+    page = max(page, 1)
+    page_size = max(min(page_size, 200), 1)
+    offset = (page - 1) * page_size
 
-    memories = [_memory_row(row, lifecycle_by_id.get(row["memory_id"])) for row in rows]
-    if status:
-        memories = [m for m in memories if m["status"] == status]
-    return {"memories": memories}
+    with _db() as con:
+        lifecycle_by_id = {r["memory_id"]: r for r in con.execute("SELECT * FROM lifecycle").fetchall()}
+
+        if status:
+            # Status lives in `lifecycle`, not `memories` — filter in
+            # Python against the small per-scope set rather than a SQL
+            # join, then paginate the filtered list ourselves.
+            all_rows = con.execute(f"SELECT m.* FROM memories m {where} ORDER BY m.updated_at DESC", params).fetchall()
+            memories = [_memory_row(r, lifecycle_by_id.get(r["memory_id"])) for r in all_rows]
+            memories = [m for m in memories if m["status"] == status]
+            total = len(memories)
+            memories = memories[offset : offset + page_size]
+        else:
+            total = con.execute(f"SELECT COUNT(*) FROM memories m {where}", params).fetchone()[0]
+            rows = con.execute(
+                f"SELECT m.* FROM memories m {where} ORDER BY m.updated_at DESC LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
+            memories = [_memory_row(r, lifecycle_by_id.get(r["memory_id"])) for r in rows]
+
+    return {
+        "memories": memories,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max((total + page_size - 1) // page_size, 1),
+    }
+
+
+@app.get("/api/memory-types")
+def memory_types():
+    with _db() as con:
+        rows = con.execute("SELECT DISTINCT memory_type FROM memories ORDER BY memory_type").fetchall()
+    return {"memory_types": [r[0] for r in rows]}
 
 
 @app.get("/api/memories/{memory_id}/history")
@@ -312,13 +368,23 @@ def _document_count(scope_key: Optional[str]) -> dict:
 # ------------------------------------------------------- sessions/checkpoints
 
 @app.get("/api/checkpoints")
-def checkpoints(scope_key: Optional[str] = None, limit: int = 100):
+def checkpoints(scope_key: Optional[str] = None, page: int = 1, page_size: int = 20):
     where = "WHERE scope_key = ?" if scope_key else ""
     params = (scope_key,) if scope_key else ()
+    page = max(page, 1)
+    page_size = max(min(page_size, 200), 1)
+    offset = (page - 1) * page_size
+
     with _db() as con:
+        total = con.execute(f"SELECT COUNT(*) FROM checkpoints {where}", params).fetchone()[0]
+        # Newest-first for a paginated list (page 1 = most recent), but
+        # the timeline view still wants chronological order — the
+        # frontend reverses the page it renders as a timeline.
         rows = con.execute(
-            f"SELECT * FROM checkpoints {where} ORDER BY created_at ASC LIMIT ?", (*params, limit)
+            f"SELECT * FROM checkpoints {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, page_size, offset),
         ).fetchall()
+
     return {
         "checkpoints": [
             {
@@ -334,7 +400,11 @@ def checkpoints(scope_key: Optional[str] = None, limit: int = 100):
                 "created_at": r["created_at"],
             }
             for r in rows
-        ]
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max((total + page_size - 1) // page_size, 1),
     }
 
 
@@ -371,13 +441,59 @@ def recall_preview(body: dict):
 
 
 @app.get("/api/traces")
-def traces_proxy(operation: Optional[str] = None, limit: int = 50):
+def traces_proxy(operation: Optional[str] = None, session_id: Optional[str] = None, limit: int = 50):
+    """The ring buffer only supports `operation` + `limit` server-side
+    (see apps/api/rest/observability.py) — session_id is filtered here,
+    over-fetching when a session filter is requested since there's no
+    way to push it down to the buffer itself."""
     try:
-        response = httpx.get(f"{AFTERMIND_API_URL}/traces", params={"operation": operation, "limit": limit}, timeout=5)
+        fetch_limit = max(limit * 5, 200) if session_id else limit
+        response = httpx.get(f"{AFTERMIND_API_URL}/traces", params={"operation": operation, "limit": fetch_limit}, timeout=5)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Aftermind API unreachable: {exc}")
+
+    if session_id:
+        traces = [t for t in payload.get("traces", []) if _parse_scope_key(t.get("scope", "")).get("session_id") == session_id]
+        payload = {"traces": traces[:limit]}
+    return payload
+
+
+@app.get("/api/sessions")
+def sessions(scope_key: Optional[str] = None, limit: int = 500):
+    """Distinct sessions seen in recent traces — project + session_id
+    pairs, most recently active first. Powers the session filter/
+    breakdown views; there is no persisted "sessions" table (sessions
+    are execution-scope, stripped from durable memories/checkpoints by
+    design — see AGENTS.md's scope-discipline section), so this is
+    reconstructed from the trace ring buffer, which is the only place
+    that scope level survives."""
+    try:
+        response = httpx.get(f"{AFTERMIND_API_URL}/traces", params={"limit": limit}, timeout=5)
+        response.raise_for_status()
+        traces = response.json().get("traces", [])
+    except Exception:
+        return {"sessions": []}
+
+    seen: dict[tuple, dict] = {}
+    for t in traces:
+        levels = _parse_scope_key(t.get("scope", ""))
+        session_id = levels.get("session_id")
+        if not session_id:
+            continue
+        if scope_key and t.get("scope") != scope_key:
+            continue
+        key = (levels.get("project_id"), session_id)
+        entry = seen.setdefault(
+            key,
+            {"project_id": levels.get("project_id"), "session_id": session_id, "operations": 0, "last_seen": t.get("started_at")},
+        )
+        entry["operations"] += 1
+        if t.get("started_at", "") > entry["last_seen"]:
+            entry["last_seen"] = t.get("started_at")
+
+    return {"sessions": sorted(seen.values(), key=lambda s: s["last_seen"] or "", reverse=True)}
 
 
 @app.get("/api/traces/{trace_id}")

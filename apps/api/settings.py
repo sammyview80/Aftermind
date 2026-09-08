@@ -33,7 +33,9 @@ class Settings:
     # Canonical store
     database_path: str = DEFAULT_DB_PATH
 
-    # LLM (OpenAI-compatible; OpenRouter by default)
+    # LLM: openai_compatible (key + base_url), codex_oauth (Codex CLI login),
+    # claude_code_oauth (Claude Code login) — see providers/llm/factory.py
+    llm_provider: str = "openai_compatible"
     llm_api_key: str = ""
     llm_model: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
@@ -70,6 +72,7 @@ class Settings:
         env = os.environ.get
         settings = cls(
             database_path=env("DATABASE_PATH", DEFAULT_DB_PATH),
+            llm_provider=env("LLM_PROVIDER", "openai_compatible").strip().lower() or "openai_compatible",
             llm_api_key=env("LLM_API_KEY", ""),
             llm_model=env("LLM_MODEL", ""),
             llm_base_url=env("LLM_BASE_URL", cls.llm_base_url),
@@ -97,6 +100,10 @@ class Settings:
         return settings
 
     def validate(self) -> None:
+        from providers.llm.factory import PROVIDERS
+
+        if self.llm_provider not in PROVIDERS:
+            raise ValueError(f"LLM_PROVIDER must be one of {', '.join(PROVIDERS)}, got {self.llm_provider!r}")
         if self.sync_mode not in (EAGER, BACKGROUND):
             raise ValueError(f"AFTERMIND_SYNC_MODE must be '{EAGER}' or '{BACKGROUND}', got {self.sync_mode!r}")
         if self.log_format not in ("text", "json"):
@@ -105,6 +112,12 @@ class Settings:
             raise ValueError("AFTERMIND_SYNC_MAX_ATTEMPTS must be >= 1")
         if self.sync_poll_seconds <= 0:
             raise ValueError("AFTERMIND_SYNC_POLL_SECONDS must be > 0")
+
+    @property
+    def llm_configured(self) -> bool:
+        if self.llm_provider != "openai_compatible":
+            return True
+        return bool(self.llm_api_key and self.llm_model)
 
     @property
     def graph_backend(self) -> str:

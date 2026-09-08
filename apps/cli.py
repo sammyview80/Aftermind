@@ -1,5 +1,6 @@
 """`aftermind` command-line entry point.
 
+    aftermind init             pick the LLM: reuse Codex / Claude Code / OpenRouter logins, or a new key
     aftermind up               one command: .env, Neo4j (docker), OpenKnowledge, SQLite, API
     aftermind down             stop what `up` started
     aftermind status           what is running / reachable
@@ -20,11 +21,31 @@ import sys
 import threading
 
 
+def _cmd_init(args: argparse.Namespace) -> int:
+    from apps.setup import llm_setup, stack
+
+    root = stack.repo_root()
+    stack.ensure_env(root)
+    ok = llm_setup.run(
+        root,
+        provider=args.provider,
+        model=args.model,
+        assume_yes=args.yes,
+        skip_verify=args.no_verify,
+    )
+    return 0 if ok else 1
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
-    from apps.setup import stack
+    from apps.setup import llm_setup, stack
+    from providers.llm.factory import llm_configured
 
     serve = "foreground" if args.foreground else args.serve
     report = stack.up(serve=serve)
+    if not args.no_init and not llm_configured(report.env) and sys.stdin.isatty():
+        # First run: offer the machine's existing logins before anything
+        # else, so observe() can learn without a paste-a-key step.
+        llm_setup.run(stack.repo_root())
     if serve == "foreground":
         if not report.sqlite:
             return 1
@@ -157,9 +178,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aftermind", description="Aftermind memory runtime")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    init = sub.add_parser("init", help="choose the LLM: reuse existing Codex/Claude Code/OpenRouter credentials or add a key")
+    init.add_argument("--provider", choices=["openai_compatible", "codex_oauth", "claude_code_oauth"], default=None)
+    init.add_argument("--model", default=None)
+    init.add_argument("-y", "--yes", action="store_true", help="non-interactive: take the first detected credential")
+    init.add_argument("--no-verify", action="store_true", help="skip the test completion")
+    init.set_defaults(func=_cmd_init)
+
     up = sub.add_parser("up", help="bring up .env, Neo4j, OpenKnowledge, SQLite and the API")
     up.add_argument("--serve", choices=["detach", "none"], default="detach", help="API: background (default) or skip")
     up.add_argument("--foreground", action="store_true", help="run the API in this terminal")
+    up.add_argument("--no-init", action="store_true", help="don't run the interactive LLM setup when none is configured")
     up.set_defaults(func=_cmd_up)
 
     down = sub.add_parser("down", help="stop the API, OpenKnowledge and the Neo4j container")

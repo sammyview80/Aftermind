@@ -13,7 +13,7 @@ def test_ensure_env_creates_from_example_and_fills_local_defaults(tmp_path):
     assert written["DATABASE_PATH"] == "./aftermind.db"
     assert written["NEO4J_URI"] == "bolt://localhost:7687"
     assert "# comment" in (tmp_path / ".env").read_text()  # comments preserved
-    assert any("LLM_API_KEY" in line for line in logs)  # warned, not blocked
+    assert any("no LLM configured" in line for line in logs)  # warned, not blocked
 
 
 def test_ensure_env_is_idempotent_and_respects_existing_values(tmp_path):

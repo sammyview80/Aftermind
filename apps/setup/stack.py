@@ -110,8 +110,10 @@ def ensure_env(root: Path, log: Log = _default_log, have_ok: Optional[bool] = No
         write_env_values(env_path, updates)
         values.update(updates)
 
-    if not values.get("LLM_API_KEY") or not values.get("LLM_MODEL"):
-        log("WARNING: LLM_API_KEY / LLM_MODEL are empty in .env — recall works, observe() needs them.")
+    from providers.llm.factory import llm_configured
+
+    if not llm_configured(values):
+        log("WARNING: no LLM configured in .env — recall works, observe() needs one. Run `aftermind init`.")
     return values
 
 

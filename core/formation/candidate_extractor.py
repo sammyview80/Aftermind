@@ -1,3 +1,5 @@
+import re
+
 from core.json_utils import parse_json_response
 from domain.enums.memory_type import MemoryType
 from domain.interfaces.llm_provider import LLMProvider
@@ -27,6 +29,29 @@ def _is_trivial(text: str) -> bool:
     return not normalized or normalized in _TRIVIAL_PHRASES
 
 
+# "Codex here: we decided X" / "Hermes here — X" / "As Claude Code, I think X".
+# A memory is recalled state, not a quoted voice: injected back into another
+# agent's context, first-person framing from a *different* agent reads like
+# prompt injection and gets flagged, even when the fact itself is fine.
+# Strip the framing, keep the statement.
+# Agent name = 1-3 Capitalized words ("Codex", "Claude Code", "Hermes Agent"),
+# so ordinary sentences ("The config lives here: x") never match.
+_AGENT_NAME = r"[A-Z][\w-]*(?:\s+[A-Z][\w-]*){0,2}"
+_AGENT_FRAMING = re.compile(
+    r"^\s*(?:\[[^\]]{1,40}\]\s*)?"  # optional [tag]
+    rf"(?:(?:this is |it's |it is )?{_AGENT_NAME}\s+here(?:\s*(?:again|speaking))?"  # "Codex here", "Claude Code here again"
+    rf"|As\s+{_AGENT_NAME})"  # "As Codex,"
+    r"\s*[:,—–-]\s*",
+)
+
+
+def strip_agent_framing(text: str) -> str:
+    stripped = _AGENT_FRAMING.sub("", text, count=1).strip()
+    if not stripped:
+        return text.strip()
+    return stripped[0].upper() + stripped[1:] if stripped[0].islower() else stripped
+
+
 class CandidateExtractor:
     """Pulls candidate memories out of an Experience.
 
@@ -36,7 +61,7 @@ class CandidateExtractor:
     """
 
     def extract(self, experience: Experience) -> list[Candidate]:
-        text = (experience.output or experience.input or "").strip()
+        text = strip_agent_framing((experience.output or experience.input or "").strip())
         if _is_trivial(text):
             return []
 
