@@ -2,18 +2,31 @@ from apps.api.mcp import tools
 from core.facade import AftermindService
 
 
-def build_server(service: AftermindService):
-    """Build the Aftermind MCP server, registering memory_observe/
-    memory_recall/memory_checkpoint/memory_search. The `mcp` package is
-    imported lazily so this module (and apps/api/mcp/tools.py) can be
-    unit-tested without it installed — only actually running the server
-    requires it."""
+def _import_server_class():
+    """The `mcp` package renamed FastMCP -> MCPServer in its 2.x
+    release (mcp.server.fastmcp -> mcp.server.mcpserver). Try both so
+    this works whichever major version is installed. Imported lazily so
+    this module (and apps/api/mcp/tools.py) can be unit-tested without
+    `mcp` installed at all — only actually building the server requires it."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp import FastMCP  # mcp < 2
+
+        return FastMCP
+    except ImportError:
+        pass
+    try:
+        from mcp.server.mcpserver import MCPServer  # mcp >= 2
+
+        return MCPServer
     except ImportError as exc:
         raise ImportError("The MCP server requires the 'mcp' package: pip install mcp") from exc
 
-    server = FastMCP("aftermind")
+
+def build_server(service: AftermindService):
+    """Build the Aftermind MCP server, registering memory_observe/
+    memory_recall/memory_checkpoint/memory_search."""
+    server_class = _import_server_class()
+    server = server_class("aftermind")
 
     @server.tool()
     def memory_observe(
@@ -47,6 +60,17 @@ def build_server(service: AftermindService):
         return tools.memory_search(service, scope=scope, query=query, limit=limit)
 
     return server
+
+
+def build_asgi_app(service: AftermindService):
+    """Return an ASGI app serving MCP over streamable HTTP, mountable
+    into the FastAPI app at "/mcp" (see apps/api/main.py). Internally
+    serves at its own root "/" so the external URL is exactly
+    "http://<host>:<port>/mcp" — matching a typical MCP client config's
+    `url` field — with no doubled-up "/mcp/mcp" path.
+    """
+    server = build_server(service)
+    return server.streamable_http_app(streamable_http_path="/", stateless_http=True)
 
 
 if __name__ == "__main__":
