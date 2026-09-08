@@ -1,7 +1,7 @@
-import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from core.json_utils import parse_json_response
 from domain.enums.reconciliation_action import ReconciliationAction
 from domain.interfaces.knowledge_store import KnowledgeStore
 from domain.interfaces.llm_provider import LLMProvider
@@ -34,20 +34,22 @@ class Reconciler:
     """Decides, with LLM assistance, how a candidate relates to existing
     memory — and applies that decision to the knowledge store."""
 
-    def __init__(self, llm_provider: LLMProvider) -> None:
+    def __init__(self, llm_provider: LLMProvider, system_prompt: str = "") -> None:
         self._llm = llm_provider
+        self._system_prompt = system_prompt
 
     def build_prompt(self, candidate: Candidate, evidence: list[Memory]) -> str:
         if evidence:
             evidence_block = "\n".join(f"{i}. [{m.memory_id}] {m.content}" for i, m in enumerate(evidence, start=1))
         else:
             evidence_block = "None found."
-        return _PROMPT_TEMPLATE.format(candidate_content=candidate.content, evidence_block=evidence_block)
+        task = _PROMPT_TEMPLATE.format(candidate_content=candidate.content, evidence_block=evidence_block)
+        return f"{self._system_prompt}\n\n{task}" if self._system_prompt else task
 
     def reconcile(self, candidate: Candidate, evidence: list[Memory]) -> MemoryDecision:
         prompt = self.build_prompt(candidate, evidence)
         raw = self._llm.complete(prompt)
-        parsed = json.loads(raw)
+        parsed = parse_json_response(raw)
 
         return MemoryDecision(
             candidate_id=candidate.candidate_id,

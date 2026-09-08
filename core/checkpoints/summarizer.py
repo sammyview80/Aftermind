@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 
+from core.json_utils import parse_json_response
 from domain.enums.event_type import EventType
+from domain.interfaces.llm_provider import LLMProvider
 from domain.models.experience import Experience
 
 _COMPLETED_TYPES = frozenset({EventType.TOOL_COMPLETED, EventType.TASK_COMPLETED})
@@ -56,4 +58,48 @@ class CheckpointSummarizer:
             current=current,
             blockers=blockers,
             next_steps=next_steps,
+        )
+
+
+_SUMMARIZER_PROMPT_TEMPLATE = """PREVIOUS CHECKPOINT: {previous_goal}
+
+EXPERIENCE:
+input: {input}
+output: {output}
+events: {events}
+
+Return a single JSON object:
+{{"goal": "...", "completed": ["..."], "current": "...", "blocked_by": ["..."], "next_steps": ["..."]}}
+"""
+
+
+class LLMCheckpointSummarizer:
+    """LLM-backed summarization using providers/llm/prompts/checkpoint.md
+    as its instructions, for cases where rule-based extraction from
+    typed events (CheckpointSummarizer) misses nuance in free-form
+    conversation."""
+
+    def __init__(self, llm_provider: LLMProvider, system_prompt: str = "") -> None:
+        self._llm = llm_provider
+        self._system_prompt = system_prompt
+
+    def build_prompt(self, experience: Experience, previous_goal: str = "") -> str:
+        task = _SUMMARIZER_PROMPT_TEMPLATE.format(
+            previous_goal=previous_goal or "None.",
+            input=experience.input,
+            output=experience.output,
+            events=[e.event_type.value for e in experience.events],
+        )
+        return f"{self._system_prompt}\n\n{task}" if self._system_prompt else task
+
+    def summarize(self, experience: Experience, previous_goal: str = "") -> CheckpointSummary:
+        raw = self._llm.complete(self.build_prompt(experience, previous_goal))
+        parsed = parse_json_response(raw)
+
+        return CheckpointSummary(
+            goal=parsed.get("goal", ""),
+            completed=tuple(parsed.get("completed", ())),
+            current=parsed.get("current", ""),
+            blockers=tuple(parsed.get("blocked_by", ())),
+            next_steps=tuple(parsed.get("next_steps", ())),
         )

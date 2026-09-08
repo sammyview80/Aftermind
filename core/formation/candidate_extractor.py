@@ -1,3 +1,6 @@
+from core.json_utils import parse_json_response
+from domain.enums.memory_type import MemoryType
+from domain.interfaces.llm_provider import LLMProvider
 from domain.models.candidate import Candidate
 from domain.models.experience import Experience
 
@@ -44,4 +47,54 @@ class CandidateExtractor:
                 content=text,
                 source_event_ids=tuple(event.event_id for event in experience.events),
             )
+        ]
+
+
+_EXTRACTOR_PROMPT_TEMPLATE = """EXPERIENCE:
+input: {input}
+output: {output}
+events: {events}
+
+Return a JSON array of candidates (empty array if nothing meaningful):
+[{{"content": "...", "memory_type": "semantic|episodic|procedural", \
+"entities": ["..."], "relationships": ["..."], "user_confirmed": true|false|null, \
+"confidence": <0-1>}}]
+"""
+
+
+class LLMCandidateExtractor:
+    """LLM-backed candidate extraction using providers/llm/prompts/candidate_extractor.md
+    as its instructions. Extraction stays advisory — the runtime (this
+    class) still owns turning the model's proposals into Candidate
+    objects; nothing here decides whether a candidate is worth keeping."""
+
+    def __init__(self, llm_provider: LLMProvider, system_prompt: str = "") -> None:
+        self._llm = llm_provider
+        self._system_prompt = system_prompt
+
+    def build_prompt(self, experience: Experience) -> str:
+        task = _EXTRACTOR_PROMPT_TEMPLATE.format(
+            input=experience.input,
+            output=experience.output,
+            events=[e.event_type.value for e in experience.events],
+        )
+        return f"{self._system_prompt}\n\n{task}" if self._system_prompt else task
+
+    def extract(self, experience: Experience) -> list[Candidate]:
+        raw = self._llm.complete(self.build_prompt(experience))
+        proposals = parse_json_response(raw)
+
+        return [
+            Candidate(
+                experience_id=experience.experience_id,
+                scope=experience.scope,
+                content=proposal["content"],
+                memory_type=MemoryType(proposal.get("memory_type", MemoryType.SEMANTIC.value)),
+                entities=tuple(proposal.get("entities", ())),
+                relationships=tuple(proposal.get("relationships", ())),
+                confidence=float(proposal.get("confidence", 0.0)),
+                user_confirmed=proposal.get("user_confirmed"),
+                source_event_ids=tuple(event.event_id for event in experience.events),
+            )
+            for proposal in proposals
         ]
