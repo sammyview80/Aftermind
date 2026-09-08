@@ -5,3 +5,7 @@ __pycache__/
 .env
 .venv/
 *.db
+*.db-wal
+*.db-shm
+*.egg-info/
+openknowledge_store/

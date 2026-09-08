@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 
 from apps.api.deps import get_service
@@ -19,6 +19,9 @@ class RecallResponse(BaseModel):
     context: str
     memories: list[MemorySummary]
     related_entities: list[str]
+    trace_id: str
+    recall_sources: list[str] = []
+    recall_latency_ms: float | None = None
 
 
 class SearchRequest(BaseModel):
@@ -41,12 +44,20 @@ def _summarize(memories) -> list[MemorySummary]:
 
 
 @router.post("/recall", response_model=RecallResponse)
-def recall(request: RecallRequest, service: AftermindService = Depends(get_service)) -> RecallResponse:
-    result = service.recall(RecallQuery(scope=request.scope.to_domain(), text=request.text, limit=request.limit))
+def recall(
+    request: RecallRequest, response: Response, service: AftermindService = Depends(get_service)
+) -> RecallResponse:
+    scope = request.scope.to_domain()
+    with service.tracer.begin("recall", scope=scope.key() if scope else None) as t:
+        result = service.recall(RecallQuery(scope=scope, text=request.text, limit=request.limit))
+    response.headers["X-Aftermind-Trace-Id"] = t.trace_id
     return RecallResponse(
         context=result.context,
         memories=_summarize(result.memories),
         related_entities=list(result.related_entities),
+        trace_id=t.trace_id,
+        recall_sources=list(t.fields.get("recall_sources", [])),
+        recall_latency_ms=t.latency_ms,
     )
 
 

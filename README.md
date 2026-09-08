@@ -39,7 +39,42 @@ cp .env.example .env   # fill in LLM_API_KEY etc.
 .venv/bin/python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-REST: `/observe`, `/recall`, `/checkpoint`, `/checkpoint/latest`, `/checkpoint/from-text`, `/search`, `/consolidate`, `/health`. MCP: mounted at `/mcp/`.
+Or, once installed (`pip install -e .`), use the CLI:
+
+```bash
+aftermind serve                 # REST + MCP API with in-process sync worker
+aftermind worker                # outbox sync worker as a separate process
+aftermind sync status|run|retry # inspect / drain / requeue the durable outbox
+aftermind backup DEST           # consistent snapshot of the SQLite database
+aftermind check                 # SQLite integrity check
+aftermind config                # effective configuration, secrets redacted
+```
+
+REST: `/observe`, `/recall`, `/checkpoint`, `/checkpoint/latest`, `/checkpoint/from-text`, `/search`, `/consolidate`, `/maintenance/sweep`, `/maintenance/sync`, `/traces`, `/config`, `/health`, `/health/ready`. MCP: mounted at `/mcp/`.
+
+Docker: `docker compose up -d` starts the API and Neo4j (see `docker-compose.yml`, `Dockerfile`).
+
+## Reliability model
+
+SQLite is the canonical store. Neo4j/Graphiti (relationships) and OpenKnowledge (consolidated documents) are derived views kept in sync through a **transactional outbox**:
+
+```
+observe()
+  SQLite transaction
+  ├─ write memory + lifecycle + decision + checkpoint
+  └─ write sync jobs (graph_sync, knowledge_consolidate, ...)
+  commit
+  flush jobs   eager: try now; on failure the job stays pending with backoff
+               background: leave for the worker
+sync worker     retries pending jobs (1s..5min backoff), resumes after a crash,
+                marks jobs dead after AFTERMIND_SYNC_MAX_ATTEMPTS
+```
+
+A Neo4j or OpenKnowledge outage therefore never loses a memory or fails an `observe()`; the response and trace show `neo4j_sync: pending` and the backlog is visible at `/maintenance/sync`. Reads degrade the same way: recall still returns SQLite memories when the graph or document store is down.
+
+Every operation emits one structured trace (`aftermind.trace` logger, and `GET /traces`) with `observe_id`, scope, `candidate_count`, `reconciliation_action`, `sqlite_write`, `neo4j_sync`, `openknowledge_sync`, `checkpoint_created`, `recall_sources`, `llm_calls`, `llm_latency_ms`, latency, and per-stage spans. `/observe` returns the `observe_id` and per-store sync status; `X-Aftermind-Trace-Id` is set on responses.
+
+Configuration is environment-only; see `.env.example` for every knob (`AFTERMIND_SYNC_MODE`, `AFTERMIND_SYNC_WORKER`, `NEO4J_TIMEOUT_SECONDS`, `AFTERMIND_LOG_FORMAT=json`, ...).
 
 ## Contributing
 

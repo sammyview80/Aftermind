@@ -1,0 +1,65 @@
+# Aftermind runtime: API (+ in-process sync worker) and Neo4j.
+#
+#   cp .env.example .env    # set LLM_API_KEY / LLM_MODEL, NEO4J_PASSWORD
+#   docker compose up -d
+#   curl localhost:8000/health/ready
+#
+# SQLite is canonical and lives in the `aftermind-data` volume; if Neo4j
+# is down, memory writes still succeed and graph sync is retried from
+# the durable outbox once it is back (see /maintenance/sync).
+services:
+  api:
+    build: .
+    ports:
+      - "${AFTERMIND_PORT:-8000}:8000"
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/aftermind.db
+      NEO4J_URI: bolt://neo4j:7687
+      AFTERMIND_LOG_FORMAT: json
+      # Set to "false" and enable the `worker` service below to run the
+      # outbox worker as a separate process.
+      AFTERMIND_SYNC_WORKER: "true"
+    volumes:
+      - aftermind-data:/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional dedicated outbox worker (scale independently of the API).
+  # Uncomment and set AFTERMIND_SYNC_WORKER=false on `api`.
+  # worker:
+  #   build: .
+  #   command: ["aftermind", "worker"]
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_PATH: /data/aftermind.db
+  #     NEO4J_URI: bolt://neo4j:7687
+  #     AFTERMIND_LOG_FORMAT: json
+  #   volumes:
+  #     - aftermind-data:/data
+  #   depends_on:
+  #     neo4j:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  aftermind-data:
+  neo4j-data:

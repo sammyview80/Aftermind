@@ -51,3 +51,13 @@ def test_close_closes_the_driver():
 
 def test_default_uri_is_bolt_localhost():
     assert DEFAULT_URI == "bolt://localhost:7687"
+
+
+def test_driver_config_bounds_every_neo4j_wait():
+    from providers.graphiti.client import driver_config
+
+    assert driver_config(3.0) == {
+        "connection_timeout": 3.0,
+        "connection_acquisition_timeout": 3.0,
+        "max_transaction_retry_time": 3.0,
+    }

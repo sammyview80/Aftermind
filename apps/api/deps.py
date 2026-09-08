@@ -1,19 +1,22 @@
-import os
-import sys
+import logging
 from functools import lru_cache
 
+from apps.api.settings import Settings
 from core.facade import AftermindService
+from core.observability import trace
+from core.observability.logging_setup import configure_logging
+from core.sync.worker import SyncWorker
 from providers.inmemory.store import InMemoryGraphStore
 from providers.llm.openrouter import OpenRouterProvider
 from providers.sqlite.checkpoint_store import SqliteCheckpointStore
-from providers.sqlite.client import DEFAULT_DB_PATH, SqliteClient
+from providers.sqlite.client import SqliteClient
 from providers.sqlite.decision_store import SqliteDecisionStore
 from providers.sqlite.episode_store import SqliteEpisodeStore
 from providers.sqlite.knowledge_store import SqliteKnowledgeStore
 from providers.sqlite.lifecycle_store import SqliteLifecycleStore
+from providers.sqlite.sync_job_store import SqliteSyncJobStore
 
-DEFAULT_NEO4J_URI = "bolt://localhost:7687"
-DEFAULT_NEO4J_USER = "neo4j"
+_LOG = logging.getLogger("aftermind.api")
 
 
 class _LazyLLMProvider:
@@ -31,15 +34,38 @@ class _LazyLLMProvider:
         return self._provider.complete(prompt)
 
 
-def _build_graph_store():
-    """Phase 2 durable backend: real graphiti-core writes + Cypher reads
-    against Neo4j (NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD). Falls back to
-    the in-process InMemoryGraphStore — printing why — if graphiti-core/
-    neo4j aren't installed or the database isn't reachable, so the rest
-    of the service still starts."""
-    password = os.environ.get("NEO4J_PASSWORD")
-    if not password:
-        print("NEO4J_PASSWORD not set — GraphStore falling back to in-memory.", file=sys.stderr)
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    settings = Settings.from_env()
+    configure_logging(settings.log_level, settings.log_format)
+    return settings
+
+
+@lru_cache(maxsize=1)
+def get_trace_sink() -> trace.InMemoryTraceSink:
+    """The process's recent-trace ring buffer, exposed via /traces. It is
+    attached to the default tracer so facade traces land in it as well
+    as in the structured log."""
+    sink = trace.InMemoryTraceSink(maxlen=get_settings().trace_buffer_size)
+    trace.default_tracer.sinks.append(sink)
+    return sink
+
+
+@lru_cache(maxsize=1)
+def get_sqlite_client() -> SqliteClient:
+    return SqliteClient(get_settings().database_path)
+
+
+def _build_graph_store(settings: Settings):
+    """Durable backend: real graphiti-core writes + Cypher reads against
+    Neo4j (NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD). Falls back to the
+    in-process InMemoryGraphStore — logging why — if graphiti-core/neo4j
+    aren't installed or no password is configured, so the rest of the
+    service still starts. A configured-but-unreachable Neo4j is *not* a
+    reason to fall back: writes then fail into the durable outbox and
+    are retried once it is back."""
+    if not settings.neo4j_password:
+        _LOG.warning("NEO4J_PASSWORD not set — GraphStore falling back to in-memory (graph state is not durable).")
         return InMemoryGraphStore()
 
     try:
@@ -47,29 +73,28 @@ def _build_graph_store():
         from providers.graphiti.graphiti_client import GraphitiWriter
         from providers.graphiti.store import GraphitiStore
 
-        uri = os.environ.get("NEO4J_URI", DEFAULT_NEO4J_URI)
-        user = os.environ.get("NEO4J_USER", DEFAULT_NEO4J_USER)
-        writer = GraphitiWriter(uri, user, password)
-        client = Neo4jClient(uri, user, password)
+        timeout = settings.neo4j_timeout_seconds
+        writer = GraphitiWriter(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password, timeout=timeout)
+        client = Neo4jClient(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password, timeout=timeout)
         return GraphitiStore(writer, client)
-    except Exception as exc:  # noqa: BLE001 - infra may simply not be up yet
-        print(f"GraphStore falling back to in-memory: {exc}", file=sys.stderr)
+    except ImportError as exc:
+        _LOG.warning("GraphStore falling back to in-memory: %s", exc)
         return InMemoryGraphStore()
 
 
 @lru_cache(maxsize=1)
 def get_document_store():
-    """Phase 3 durable backend: OpenKnowledge for consolidated, human-
-    readable knowledge (the Consolidation Engine's output — not every
-    StoredMemory). OPENKNOWLEDGE_URL points at a running `ok start` / OK
-    Desktop server; unset falls back to a local markdown directory."""
+    """OpenKnowledge for consolidated, human-readable knowledge (the
+    Consolidation Engine's output — not every StoredMemory).
+    OPENKNOWLEDGE_URL points at a running `ok start` / OK Desktop server;
+    unset falls back to a local markdown directory."""
     from providers.openknowledge.store import OpenKnowledgeStore
 
-    openknowledge_url = os.environ.get("OPENKNOWLEDGE_URL")
-    if openknowledge_url:
+    settings = get_settings()
+    if settings.openknowledge_url:
         from providers.openknowledge.remote_client import RemoteOpenKnowledgeClient
 
-        return OpenKnowledgeStore(RemoteOpenKnowledgeClient(openknowledge_url))
+        return OpenKnowledgeStore(RemoteOpenKnowledgeClient(settings.openknowledge_url))
 
     from providers.openknowledge.client import LocalMarkdownClient
 
@@ -79,26 +104,39 @@ def get_document_store():
 @lru_cache(maxsize=1)
 def get_service() -> AftermindService:
     """The process-wide AftermindService singleton, built once on first
-    use.
-
-    Phase 1 durable backend: SQLite (experiences, memories, checkpoints,
-    memory decisions, lifecycle metadata), configured via DATABASE_PATH
-    (default ./aftermind.db).
-    Phase 2 durable backend: Graphiti + Neo4j for entities/relationships,
-    configured via NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD.
-    Phase 3 durable backend: OpenKnowledge for consolidated knowledge,
-    configured via OPENKNOWLEDGE_URL (see get_document_store()).
-    """
-    db_path = os.environ.get("DATABASE_PATH", DEFAULT_DB_PATH)
-    client = SqliteClient(db_path)
+    use. SQLite is the canonical store (memories, checkpoints,
+    lifecycle, decisions, experiences, sync-job outbox); Neo4j/Graphiti
+    and OpenKnowledge are secondary stores kept in sync through the
+    durable outbox so their outages never lose a memory."""
+    settings = get_settings()
+    get_trace_sink()
+    client = get_sqlite_client()
 
     return AftermindService(
         knowledge_store=SqliteKnowledgeStore(client),
-        graph_store=_build_graph_store(),
+        graph_store=_build_graph_store(settings),
         checkpoint_store=SqliteCheckpointStore(client),
         lifecycle_store=SqliteLifecycleStore(client),
         llm_provider=_LazyLLMProvider(),
         episode_store=SqliteEpisodeStore(client),
         decision_store=SqliteDecisionStore(client),
         document_store=get_document_store(),
+        sync_job_store=SqliteSyncJobStore(client),
+        unit_of_work=client,
+        sync_mode=settings.sync_mode,
+        sync_max_attempts=settings.sync_max_attempts,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_sync_worker() -> SyncWorker:
+    """The background worker draining the outbox — retries failed
+    graph/document syncs and resumes anything left pending by a crash."""
+    settings = get_settings()
+    return SyncWorker(
+        job_store=SqliteSyncJobStore(get_sqlite_client()),
+        dispatcher=get_service().sync,
+        poll_interval=settings.sync_poll_seconds,
+        batch_size=settings.sync_batch_size,
+        stale_running_seconds=settings.sync_stale_running_seconds,
     )

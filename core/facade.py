@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Iterable, Optional
 
 from core.checkpoints.manager import CheckpointManager
@@ -15,6 +16,8 @@ from core.consolidation.validator import ConsolidationValidator
 from core.formation.candidate_extractor import CandidateExtractor
 from core.formation.evaluator import MemoryEvaluator
 from core.lifecycle.manager import LifecycleManager
+from core.observability import trace
+from core.observability.llm import TracedLLMProvider
 from core.recall.context_builder import ContextBuilder
 from core.recall.planner import RecallPlanner
 from core.recall.ranker import Ranker
@@ -22,7 +25,9 @@ from core.recall.retriever import Retriever
 from core.reconciliation.evidence_retriever import EvidenceRetriever
 from core.reconciliation.reconciler import Reconciler
 from core.reconciliation.validator import Validator
+from core.sync.dispatcher import EAGER, SyncDispatcher
 from domain.enums.memory_status import MemoryStatus
+from domain.enums.sync_job_kind import SyncJobKind
 from domain.interfaces.checkpoint_store import CheckpointStore
 from domain.interfaces.decision_store import DecisionStore
 from domain.interfaces.document_store import DocumentStore
@@ -31,6 +36,8 @@ from domain.interfaces.graph_store import GraphStore
 from domain.interfaces.knowledge_store import KnowledgeStore
 from domain.interfaces.lifecycle_store import LifecycleStore
 from domain.interfaces.llm_provider import LLMProvider
+from domain.interfaces.sync_job_store import SyncJobStore
+from domain.interfaces.unit_of_work import UnitOfWork
 from domain.models.checkpoint import Checkpoint
 from domain.models.consolidation_result import ConsolidationResult
 from domain.models.experience import Experience
@@ -38,6 +45,7 @@ from domain.models.memory import Memory
 from domain.models.recall_query import RecallQuery
 from domain.models.recall_result import RecallResult
 from domain.models.scope import MemoryScope
+from domain.models.sync_job import DEFAULT_MAX_ATTEMPTS, SyncJob
 
 # sync_to_graph extracts (source, relation, target) triples from a
 # Memory and writes them via whatever GraphStore is wired in — pure
@@ -50,6 +58,12 @@ from domain.models.scope import MemoryScope
 from providers.graphiti.triple_extractor import LLMTripleExtractor, mark_stale_in_graph, sync_to_graph
 from providers.llm.base import load_prompt
 
+_EXCLUDED_FROM_RECALL = frozenset({MemoryStatus.ARCHIVED, MemoryStatus.EXPIRED, MemoryStatus.FORGOTTEN})
+
+
+def _scope_key(scope: Optional[MemoryScope]) -> Optional[str]:
+    return scope.key() if scope is not None else None
+
 
 class AftermindService:
     """Composition root: wires formation, reconciliation, recall,
@@ -57,6 +71,16 @@ class AftermindService:
     observe, recall, checkpoint, search — the same four surface both
     the REST API and the MCP tools call into. Nothing outside this
     class should need to know the pipeline's internal stages.
+
+    Reliability contract (see core/sync, core/observability):
+      - The knowledge store (SQLite) is canonical. observe() commits the
+        memory, its lifecycle record, decision, checkpoint and sync-job
+        rows in one UnitOfWork transaction when one is wired.
+      - Graph (Neo4j) and document (OpenKnowledge) propagation go
+        through the SyncDispatcher: a failure there leaves a durable,
+        retryable job and a `pending` trace field — never a failed
+        observe() or a lost memory.
+      - Every public operation runs inside an OperationTrace.
     """
 
     def __init__(
@@ -69,12 +93,21 @@ class AftermindService:
         episode_store: Optional[EpisodeStore] = None,
         decision_store: Optional[DecisionStore] = None,
         document_store: Optional[DocumentStore] = None,
+        sync_job_store: Optional[SyncJobStore] = None,
+        unit_of_work: Optional[UnitOfWork] = None,
+        sync_mode: str = EAGER,
+        sync_max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        tracer: trace.Tracer = trace.default_tracer,
     ) -> None:
         self.knowledge_store = knowledge_store
         self.graph_store = graph_store
         self._episode_store = episode_store
         self._decision_store = decision_store
         self._document_store = document_store
+        self._uow = unit_of_work
+        self.tracer = tracer
+
+        llm_provider = TracedLLMProvider(llm_provider)
 
         self._extractor = CandidateExtractor()
         self._evaluator = MemoryEvaluator()
@@ -95,51 +128,141 @@ class AftermindService:
         self._consolidator = LLMConsolidator(llm_provider, system_prompt=load_prompt("consolidator"))
         self._consolidation_validator = ConsolidationValidator()
 
+        self.sync = SyncDispatcher(
+            handlers={
+                SyncJobKind.GRAPH_SYNC: self._handle_graph_sync,
+                SyncJobKind.GRAPH_MARK_STALE: self._handle_graph_mark_stale,
+                SyncJobKind.KNOWLEDGE_CONSOLIDATE: self._handle_knowledge_consolidate,
+                SyncJobKind.KNOWLEDGE_RECONSOLIDATE: self._handle_knowledge_reconsolidate,
+            },
+            job_store=sync_job_store,
+            mode=sync_mode,
+            max_attempts=sync_max_attempts,
+        )
+
+    def _transaction(self):
+        return self._uow.transaction() if self._uow is not None else nullcontext()
+
+    # ------------------------------------------------------------------ observe
+
     def observe(self, experience: Experience) -> Optional[Memory]:
         """Learn from one experience: extract -> evaluate -> retrieve
         evidence -> reconcile -> validate -> apply. Returns the
         resulting memory, or None if nothing was worth remembering or
         the reconciler decided to ignore it."""
-        if self._episode_store is not None:
-            self._episode_store.save(experience)
+        with self.tracer.begin("observe", scope=_scope_key(experience.scope)) as t:
+            t.record(experience_id=experience.experience_id, sqlite_write=trace.SKIPPED)
 
-        candidates = self._extractor.extract(experience)
-        if not candidates:
-            return None
+            if self._episode_store is not None:
+                with trace.span("episode_store.save"):
+                    self._episode_store.save(experience)
 
-        candidate = self._evaluator.evaluate(candidates[0])
-        if not self._evaluator.is_worth_remembering(candidate):
-            return None
+            candidates = self._extractor.extract(experience)
+            t.record(candidate_count=len(candidates))
+            if not candidates:
+                return None
 
-        evidence = self._evidence_retriever.retrieve(candidate)
-        decision = self._reconciler.reconcile(candidate, evidence)
-        decision = self._validator.validate(decision, candidate, evidence)
+            candidate = self._evaluator.evaluate(candidates[0])
+            if not self._evaluator.is_worth_remembering(candidate):
+                t.record(reconciliation_action="not_worth_remembering")
+                return None
 
-        if self._decision_store is not None:
-            self._decision_store.save(decision)
+            with trace.span("evidence.retrieve"):
+                evidence = self._evidence_retriever.retrieve(candidate)
+            t.record(evidence_count=len(evidence))
+            with trace.span("reconcile"):
+                decision = self._reconciler.reconcile(candidate, evidence)
+            decision = self._validator.validate(decision, candidate, evidence)
+            t.record(reconciliation_action=decision.action.value)
 
-        memory = self._reconciler.apply(decision, candidate, self.knowledge_store)
+            is_milestone = any(is_milestone_event(e.event_type, DEFAULT_MILESTONE_TRIGGERS) for e in experience.events)
+            jobs: list[SyncJob] = []
 
-        if memory is not None:
-            self._lifecycle.get_or_create(memory)
-            # If applying this decision superseded any evidence memory,
-            # archive that memory's lifecycle record (content untouched),
-            # and treat any OpenKnowledge page built from it as stale.
-            for evidence_memory in evidence:
-                refreshed = self.knowledge_store.get(evidence_memory.memory_id)
-                if refreshed is not None and refreshed.superseded_by:
-                    self._lifecycle.archive_superseded(refreshed)
-                    self._reconsolidate_stale_page(refreshed, memory.scope)
-                    mark_stale_in_graph(refreshed, self.graph_store, llm_extractor=self._triple_extractor)
-            # StoredMemory -> entity/relationship extraction -> GraphStore.
-            sync_to_graph(memory, self.graph_store, llm_extractor=self._triple_extractor)
+            # Everything below writes to the canonical store; one transaction
+            # (when a UnitOfWork is wired) so a crash can't leave a memory
+            # without its lifecycle row or its sync jobs — or vice versa.
+            with trace.span("sqlite.transaction"), self._transaction():
+                if self._decision_store is not None:
+                    self._decision_store.save(decision)
 
-        self._checkpoints.checkpoint_experience(experience, memory_ids=[memory.memory_id] if memory else [])
+                memory = self._reconciler.apply(decision, candidate, self.knowledge_store)
 
-        if memory is not None:
-            self._auto_consolidate(memory, experience)
+                if memory is not None:
+                    t.record(sqlite_write=trace.OK, memory_id=memory.memory_id)
+                    self._lifecycle.get_or_create(memory)
+                    # If applying this decision superseded any evidence memory,
+                    # archive that memory's lifecycle record (content untouched),
+                    # and queue graph/document follow-ups for it.
+                    for evidence_memory in evidence:
+                        refreshed = self.knowledge_store.get(evidence_memory.memory_id)
+                        if refreshed is not None and refreshed.superseded_by:
+                            self._lifecycle.archive_superseded(refreshed)
+                            t.append("superseded_memory_ids", refreshed.memory_id)
+                            jobs.append(
+                                self.sync.enqueue(
+                                    SyncJobKind.GRAPH_MARK_STALE, {"memory_id": refreshed.memory_id}, memory.scope
+                                )
+                            )
+                            if self._document_store is not None:
+                                jobs.append(
+                                    self.sync.enqueue(
+                                        SyncJobKind.KNOWLEDGE_RECONSOLIDATE,
+                                        {"memory_id": refreshed.memory_id},
+                                        memory.scope,
+                                    )
+                                )
+                    jobs.append(self.sync.enqueue(SyncJobKind.GRAPH_SYNC, {"memory_id": memory.memory_id}, memory.scope))
+                    if self._document_store is not None:
+                        jobs.append(
+                            self.sync.enqueue(
+                                SyncJobKind.KNOWLEDGE_CONSOLIDATE,
+                                {"memory_id": memory.memory_id, "is_milestone": is_milestone},
+                                memory.scope,
+                            )
+                        )
 
-        return memory
+                checkpoint = self._checkpoints.checkpoint_experience(
+                    experience, memory_ids=[memory.memory_id] if memory else []
+                )
+                t.record(checkpoint_created=checkpoint is not None)
+
+            if self._document_store is None:
+                t.record(openknowledge_sync=trace.SKIPPED)
+            if memory is None:
+                t.record(neo4j_sync=trace.SKIPPED)
+                return None
+
+            # Committed. Secondary stores are now best-effort + durable retry.
+            self.sync.flush(jobs)
+            return memory
+
+    # --------------------------------------------------------- sync handlers
+
+    def _handle_graph_sync(self, job: SyncJob) -> None:
+        memory = self.knowledge_store.get(job.payload["memory_id"])
+        if memory is None:
+            return  # deleted/forgotten since; nothing to propagate
+        sync_to_graph(memory, self.graph_store, llm_extractor=self._triple_extractor)
+
+    def _handle_graph_mark_stale(self, job: SyncJob) -> None:
+        memory = self.knowledge_store.get(job.payload["memory_id"])
+        if memory is None:
+            return
+        mark_stale_in_graph(memory, self.graph_store, llm_extractor=self._triple_extractor)
+
+    def _handle_knowledge_consolidate(self, job: SyncJob) -> None:
+        memory = self.knowledge_store.get(job.payload["memory_id"])
+        if memory is None:
+            return
+        self._auto_consolidate(memory, is_milestone=bool(job.payload.get("is_milestone", False)))
+
+    def _handle_knowledge_reconsolidate(self, job: SyncJob) -> None:
+        memory = self.knowledge_store.get(job.payload["memory_id"])
+        if memory is None:
+            return
+        self._reconsolidate_stale_page(memory, job.scope)
+
+    # ---------------------------------------------------------- consolidation
 
     def _document_slug(self, scope: Optional[MemoryScope]) -> str:
         project = (scope.get("project_id") if scope else None) or "default"
@@ -154,7 +277,7 @@ class AftermindService:
         result = self._consolidation_validator.validate(candidate)
         return self._consolidator.apply(candidate, result, self._document_store, slug=slug, title=title)
 
-    def _auto_consolidate(self, memory: Memory, experience: Experience) -> None:
+    def _auto_consolidate(self, memory: Memory, is_milestone: bool) -> None:
         """Unsupervised knowledge promotion: after observe() commits a
         memory, check whether a cluster it belongs to is now worth
         writing/updating in OpenKnowledge. Deliberately conservative —
@@ -171,7 +294,6 @@ class AftermindService:
             return
 
         scope = memory.scope.stable() if memory.scope else None
-        is_milestone = any(is_milestone_event(e.event_type, DEFAULT_MILESTONE_TRIGGERS) for e in experience.events)
 
         # A confirmed decision / completed task / handoff is itself a
         # meaningful-enough signal that it doesn't need the full 5-memory
@@ -196,6 +318,7 @@ class AftermindService:
         title = self._document_title(scope)
         for plan in relevant_plans:
             self._run_consolidation_plan(plan, slug, title)
+        trace.record(consolidation_plans=len(relevant_plans))
 
     def _reconsolidate_stale_page(self, superseded_memory: Memory, scope: Optional[MemoryScope]) -> None:
         """A memory that fed into an OpenKnowledge section just got
@@ -224,63 +347,93 @@ class AftermindService:
             if plan.topic in existing_headings:
                 self._run_consolidation_plan(plan, slug, document.title)
 
+    # ------------------------------------------------------------------- recall
+
     def recall(self, query: RecallQuery) -> RecallResult:
         """Hybrid recall: fuse SQLite (current + historical memories),
         Neo4j/Graphiti (relationships), OpenKnowledge (consolidated
         knowledge), and the latest checkpoint into one ranked, compact
         context — not four raw blobs. Retrieved memories are reinforced
         (lifecycle access)."""
-        stable_scope = query.scope.stable() if query.scope else None
-        checkpoint = self._checkpoints.latest(query.scope)
-        plan = self._recall_planner.plan(query, checkpoint)
-        evidence = self._recall_retriever.retrieve(plan)
+        with self.tracer.begin("recall", scope=_scope_key(query.scope)) as t:
+            t.record(query_id=query.query_id, recall_sources=[])
+            stable_scope = query.scope.stable() if query.scope else None
 
-        statuses = {
-            memory.memory_id: self._lifecycle.status_of(memory.memory_id, scope=memory.scope)
-            for memory in evidence.memories
-        }
-        # Archived/expired/forgotten memories are excluded from *normal*
-        # recall entirely — same treatment as superseded ones — not just
-        # deprioritized by score. history() (via evidence.historical_memories)
-        # is the deliberate path for surfacing them when asked for.
-        _EXCLUDED_FROM_RECALL = frozenset({MemoryStatus.ARCHIVED, MemoryStatus.EXPIRED, MemoryStatus.FORGOTTEN})
-        recallable = [m for m in evidence.memories if statuses[m.memory_id] not in _EXCLUDED_FROM_RECALL]
-        ranked = self._ranker.rank(
-            plan.search_terms,
-            recallable,
-            limit=query.limit,
-            query_scope=stable_scope,
-            statuses=statuses,
-        )
+            with trace.span("checkpoint.latest"):
+                checkpoint = self._checkpoints.latest(query.scope)
+            if checkpoint is not None:
+                t.append("recall_sources", "checkpoint")
 
-        for memory in ranked:
-            self._lifecycle.record_access(memory.memory_id, scope=memory.scope)
+            plan = self._recall_planner.plan(query, checkpoint)
+            with trace.span("retrieve"):
+                evidence = self._recall_retriever.retrieve(plan)
+            if evidence.memories:
+                t.append("recall_sources", "sqlite")
+            if evidence.historical_memories:
+                t.append("recall_sources", "sqlite_history")
+            if evidence.related_entities or evidence.relationships:
+                t.append("recall_sources", "graph")
 
-        knowledge_excerpts: tuple[str, ...] = ()
-        if self._document_store is not None and query.text:
-            documents = self._document_store.search(query.text, scope=stable_scope, limit=2)
-            knowledge_excerpts = tuple(
-                f"### {section.heading}\n{section.body}"
-                for document in documents
-                for section in document.sections
+            statuses = {
+                memory.memory_id: self._lifecycle.status_of(memory.memory_id, scope=memory.scope)
+                for memory in evidence.memories
+            }
+            # Archived/expired/forgotten memories are excluded from *normal*
+            # recall entirely — same treatment as superseded ones — not just
+            # deprioritized by score. history() (via evidence.historical_memories)
+            # is the deliberate path for surfacing them when asked for.
+            recallable = [m for m in evidence.memories if statuses[m.memory_id] not in _EXCLUDED_FROM_RECALL]
+            ranked = self._ranker.rank(
+                plan.search_terms,
+                recallable,
+                limit=query.limit,
+                query_scope=stable_scope,
+                statuses=statuses,
             )
 
-        context = self._context_builder.build(
-            checkpoint,
-            ranked,
-            evidence.related_entities,
-            relationships=evidence.relationships,
-            historical_memories=evidence.historical_memories,
-            knowledge_excerpts=knowledge_excerpts,
-        )
+            with trace.span("lifecycle.record_access"):
+                for memory in ranked:
+                    self._lifecycle.record_access(memory.memory_id, scope=memory.scope)
 
-        return RecallResult(
-            query_id=query.query_id,
-            checkpoint=checkpoint,
-            memories=tuple(ranked),
-            related_entities=evidence.related_entities,
-            context=context,
-        )
+            knowledge_excerpts: tuple[str, ...] = ()
+            if self._document_store is not None and query.text:
+                # A down OpenKnowledge degrades recall (no excerpts) rather
+                # than failing it — SQLite memories are still returned.
+                with trace.span("document_store.search", reraise=False) as span:
+                    documents = self._document_store.search(query.text, scope=stable_scope, limit=2)
+                    knowledge_excerpts = tuple(
+                        f"### {section.heading}\n{section.body}"
+                        for document in documents
+                        for section in document.sections
+                    )
+                if span is not None and span.status == trace.FAILED:
+                    t.record(openknowledge_search=trace.FAILED)
+                elif knowledge_excerpts:
+                    t.append("recall_sources", "openknowledge")
+
+            context = self._context_builder.build(
+                checkpoint,
+                ranked,
+                evidence.related_entities,
+                relationships=evidence.relationships,
+                historical_memories=evidence.historical_memories,
+                knowledge_excerpts=knowledge_excerpts,
+            )
+            t.record(
+                retrieved_count=len(evidence.memories),
+                returned_count=len(ranked),
+                context_chars=len(context),
+            )
+
+            return RecallResult(
+                query_id=query.query_id,
+                checkpoint=checkpoint,
+                memories=tuple(ranked),
+                related_entities=evidence.related_entities,
+                context=context,
+            )
+
+    # -------------------------------------------------------------- checkpoint
 
     def checkpoint(
         self,
@@ -295,16 +448,19 @@ class AftermindService:
     ) -> Checkpoint:
         """Explicitly record a checkpoint (as opposed to one derived
         automatically from an experience via observe())."""
-        return self._checkpoints.create(
-            scope=scope,
-            goal=goal,
-            current=current,
-            completed=completed,
-            blockers=blockers,
-            next_steps=next_steps,
-            memory_ids=memory_ids,
-            reason=reason,
-        )
+        with self.tracer.begin("checkpoint", scope=_scope_key(scope), reason=reason) as t:
+            checkpoint = self._checkpoints.create(
+                scope=scope,
+                goal=goal,
+                current=current,
+                completed=completed,
+                blockers=blockers,
+                next_steps=next_steps,
+                memory_ids=memory_ids,
+                reason=reason,
+            )
+            t.record(checkpoint_created=True, checkpoint_id=checkpoint.checkpoint_id, sqlite_write=trace.OK)
+            return checkpoint
 
     def checkpoint_from_text(
         self,
@@ -322,35 +478,49 @@ class AftermindService:
         if not text or not text.strip():
             return None
 
-        previous = self._checkpoints.latest(scope)
-        experience = Experience(scope=scope, input=text, output=text)
-        summary = self._checkpoint_summarizer.summarize(experience, previous_goal=previous.goal if previous else "")
+        with self.tracer.begin("checkpoint_from_text", scope=_scope_key(scope), reason=reason) as t:
+            previous = self._checkpoints.latest(scope)
+            experience = Experience(scope=scope, input=text, output=text)
+            with trace.span("summarize"):
+                summary = self._checkpoint_summarizer.summarize(
+                    experience, previous_goal=previous.goal if previous else ""
+                )
 
-        return self._checkpoints.create(
-            scope=scope,
-            goal=summary.goal,
-            current=summary.current,
-            completed=summary.completed,
-            blockers=summary.blockers,
-            next_steps=summary.next_steps,
-            memory_ids=memory_ids,
-            reason=reason,
-        )
+            checkpoint = self._checkpoints.create(
+                scope=scope,
+                goal=summary.goal,
+                current=summary.current,
+                completed=summary.completed,
+                blockers=summary.blockers,
+                next_steps=summary.next_steps,
+                memory_ids=memory_ids,
+                reason=reason,
+            )
+            t.record(checkpoint_created=True, checkpoint_id=checkpoint.checkpoint_id, sqlite_write=trace.OK)
+            return checkpoint
 
     def latest_checkpoint(self, scope: Optional[MemoryScope] = None) -> Optional[Checkpoint]:
         return self._checkpoints.latest(scope)
 
+    # ------------------------------------------------------------------- others
+
     def search(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
         """Direct memory search, without the full recall pipeline
         (no checkpoint, no ranking, no context compression)."""
-        return self.knowledge_store.search(query, scope=scope.stable() if scope else None, limit=limit)
+        with self.tracer.begin("search", scope=_scope_key(scope)) as t:
+            results = self.knowledge_store.search(query, scope=scope.stable() if scope else None, limit=limit)
+            t.record(returned_count=len(results))
+            return results
 
     def run_lifecycle_maintenance(self, scope: Optional[MemoryScope] = None):
         """Memory hygiene pass: decay every lifecycle record in scope and
         archive the ones that came out fully stale and were never
         recalled — not immediate deletion. Meant to be run periodically
         (cron/scheduler), not on every observe()/recall() call."""
-        return self._lifecycle.run_hygiene_sweep(scope=scope.stable() if scope else None)
+        with self.tracer.begin("lifecycle_maintenance", scope=_scope_key(scope)) as t:
+            results = self._lifecycle.run_hygiene_sweep(scope=scope.stable() if scope else None)
+            t.record(swept=len(results), archived=sum(1 for r in results if r.status == MemoryStatus.ARCHIVED))
+            return results
 
     def consolidate(
         self,
@@ -369,16 +539,18 @@ class AftermindService:
         if self._document_store is None:
             raise ValueError("consolidate() requires a DocumentStore (OpenKnowledge) to be configured")
 
-        stable_scope = scope.stable() if scope else None
-        memories = self.knowledge_store.list_all(scope=stable_scope)
+        with self.tracer.begin("consolidate", scope=_scope_key(scope), trigger=trigger.value) as t:
+            stable_scope = scope.stable() if scope else None
+            memories = self.knowledge_store.list_all(scope=stable_scope)
 
-        planner = ConsolidationPlanner(min_group_size=min_group_size)
-        plans = planner.plan(memories, trigger, scope=stable_scope)
+            planner = ConsolidationPlanner(min_group_size=min_group_size)
+            plans = planner.plan(memories, trigger, scope=stable_scope)
 
-        results = []
-        for plan in plans:
-            candidate = self._consolidator.consolidate(plan)
-            result = self._consolidation_validator.validate(candidate)
-            result = self._consolidator.apply(candidate, result, self._document_store, slug=slug, title=title)
-            results.append(result)
-        return results
+            results = []
+            for plan in plans:
+                candidate = self._consolidator.consolidate(plan)
+                result = self._consolidation_validator.validate(candidate)
+                result = self._consolidator.apply(candidate, result, self._document_store, slug=slug, title=title)
+                results.append(result)
+            t.record(consolidation_plans=len(plans), accepted=sum(1 for r in results if r.accepted))
+            return results

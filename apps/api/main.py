@@ -1,9 +1,12 @@
+import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
-from apps.api.deps import get_service
-from apps.api.rest import checkpoint, consolidate, health, maintenance, observe, recall
+from apps.api.deps import get_service, get_settings, get_sync_worker
+from apps.api.rest import checkpoint, consolidate, health, maintenance, observability, observe, recall
+
+_LOG = logging.getLogger("aftermind.api")
 
 try:
     from apps.api.mcp.server import build_asgi_app
@@ -21,10 +24,24 @@ except ImportError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    worker = None
+    if settings.sync_worker_enabled:
+        # Crash recovery + retry loop for graph/document sync, in-process.
+        # Run `aftermind worker` as a separate process and set
+        # AFTERMIND_SYNC_WORKER=false here to scale them independently.
+        worker = get_sync_worker()
+        worker.start()
+        _LOG.info("sync worker started (mode=%s, poll=%ss)", settings.sync_mode, settings.sync_poll_seconds)
+
     async with AsyncExitStack() as stack:
         if mcp_app is not None:
             await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
-        yield
+        try:
+            yield
+        finally:
+            if worker is not None:
+                worker.stop()
 
 
 app = FastAPI(
@@ -39,6 +56,7 @@ app.include_router(recall.router)
 app.include_router(checkpoint.router)
 app.include_router(consolidate.router)
 app.include_router(maintenance.router)
+app.include_router(observability.router)
 
 if mcp_app is not None:
     app.mount("/mcp", mcp_app)

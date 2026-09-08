@@ -34,7 +34,16 @@ python3 -m venv .venv          # system Python is externally-managed (Homebrew);
 cp .env.example .env           # fill in real values, never commit .env
 ```
 
-`.env` keys: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (OpenRouter-compatible), `DATABASE_PATH`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `OPENKNOWLEDGE_URL`.
+`.env` keys: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (OpenRouter-compatible), `DATABASE_PATH`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_TIMEOUT_SECONDS`, `OPENKNOWLEDGE_URL`, plus the `AFTERMIND_*` reliability/logging knobs documented in `.env.example`. All of them are read in exactly one place: `apps/api/settings.py::Settings.from_env()` — never `os.environ` elsewhere in `apps/`.
+
+## Reliability rules (SQLite canonical, outbox for the rest)
+
+- `core/facade.py::observe()` commits memory + lifecycle + decision + checkpoint + `sync_jobs` rows in one `UnitOfWork` transaction (`SqliteClient.transaction()`), then flushes the jobs through `core/sync/dispatcher.py`.
+- Anything that writes to Neo4j or OpenKnowledge from the observe path MUST go through a `SyncJob` kind (`domain/enums/sync_job_kind.py`) with a handler in the facade — never a direct call, or an outage becomes a failed observe. Handlers reload the memory by id (payloads carry ids, not content) and must be idempotent (retries re-run them).
+- Graph/document *reads* in recall degrade (trace field `graph_search=failed` / `openknowledge_search=failed`), they never raise out of `recall()`.
+- Every public facade operation runs inside `tracer.begin(...)`; record new per-store outcomes with the existing `ok|pending|failed|skipped` vocabulary (`core/observability/trace.py`) so `/observe` responses and `/traces` stay uniform.
+- Crash recovery: `SyncWorker.recover()` requeues jobs left `running`; `tests/integration/test_crash_recovery.py` is the gate for "write → kill → restart → sync resumes". Extend it when adding a job kind.
+- Neo4j clients are built with fail-fast timeouts (`providers/graphiti/client.py::driver_config`); don't construct a bare `GraphDatabase.driver(...)` elsewhere.
 
 ## Running tests
 
@@ -50,7 +59,9 @@ The excluded test hits a real LLM and is a known pre-existing flake against live
 .venv/bin/python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-MCP is mounted at `/mcp/` (trailing slash matters — bare `/mcp` 307-redirects). REST endpoints: `/observe`, `/recall`, `/checkpoint`, `/checkpoint/latest`, `/checkpoint/from-text`, `/search`, `/consolidate`, `/health`.
+Or `aftermind serve` / `aftermind worker` / `aftermind sync status` after `pip install -e .` (see `apps/cli.py`).
+
+MCP is mounted at `/mcp/` (trailing slash matters — bare `/mcp` 307-redirects). REST endpoints: `/observe`, `/recall`, `/checkpoint`, `/checkpoint/latest`, `/checkpoint/from-text`, `/search`, `/consolidate`, `/maintenance/sweep`, `/maintenance/sync` (+ `/run`, `/retry`), `/traces`, `/traces/{id}`, `/config`, `/health` (liveness), `/health/ready` (readiness + sync backlog).
 
 ## Real infra used for verification (prefer real over fakes when available)
 

@@ -7,12 +7,17 @@ provisioned yet. State doesn't survive a process restart. Swap in the
 Postgres/Graphiti-backed equivalents behind the same Protocols for
 production persistence.
 """
+import threading
+from dataclasses import replace
+from datetime import datetime
 from typing import Optional
 
+from domain.enums.sync_job_status import SyncJobStatus
 from domain.models.checkpoint import Checkpoint
 from domain.models.memory import Memory
 from domain.models.memory_lifecycle import MemoryLifecycle
 from domain.models.scope import MemoryScope
+from domain.models.sync_job import SyncJob
 
 
 def _scope_key(scope: Optional[MemoryScope]) -> str:
@@ -81,7 +86,12 @@ class InMemoryGraphStore:
     def upsert_relationship(
         self, source: str, relation: str, target: str, scope: Optional[MemoryScope] = None
     ) -> None:
-        self._edges.append((source, relation, target, _scope_key(scope), False))
+        # Idempotent: a retried sync job re-writes the same triples, and
+        # that must not duplicate edges (GraphitiStore dedupes the same way
+        # via graphiti-core's exact-duplicate resolution).
+        edge = (source, relation, target, _scope_key(scope), False)
+        if edge not in self._edges:
+            self._edges.append(edge)
 
     def find_related(self, entity: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[str]:
         scope_key = _scope_key(scope)
@@ -155,6 +165,60 @@ class InMemoryLifecycleStore:
             return list(self._records.values())
         scope_key = _scope_key(scope)
         return [r for r in self._records.values() if _scope_key(r.scope) == scope_key]
+
+
+class InMemorySyncJobStore:
+    """SyncJobStore without durability — for tests and for running the
+    outbox/worker machinery in-process without SQLite. Thread-safe, since
+    a background worker and request threads share it."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, SyncJob] = {}
+        self._lock = threading.Lock()
+
+    def enqueue(self, job: SyncJob) -> SyncJob:
+        return self.save(job)
+
+    def save(self, job: SyncJob) -> SyncJob:
+        with self._lock:
+            self._jobs[job.job_id] = job
+        return job
+
+    def get(self, job_id: str) -> Optional[SyncJob]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def claim_due(self, now: datetime, limit: int = 10) -> list[SyncJob]:
+        with self._lock:
+            due = sorted(
+                (j for j in self._jobs.values() if j.status == SyncJobStatus.PENDING and j.next_attempt_at <= now),
+                key=lambda j: (j.next_attempt_at, j.created_at),
+            )[:limit]
+            claimed = [replace(j, status=SyncJobStatus.RUNNING, updated_at=now) for j in due]
+            for job in claimed:
+                self._jobs[job.job_id] = job
+        return claimed
+
+    def list_jobs(self, status: Optional[SyncJobStatus] = None, limit: int = 100) -> list[SyncJob]:
+        with self._lock:
+            jobs = [j for j in self._jobs.values() if status is None or j.status == status]
+        return sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]
+
+    def counts(self) -> dict[str, int]:
+        counts = {status.value: 0 for status in SyncJobStatus}
+        with self._lock:
+            for job in self._jobs.values():
+                counts[job.status.value] += 1
+        return counts
+
+    def recover_running(self, older_than: datetime) -> int:
+        reset = 0
+        with self._lock:
+            for job_id, job in list(self._jobs.items()):
+                if job.status == SyncJobStatus.RUNNING and job.updated_at <= older_than:
+                    self._jobs[job_id] = replace(job, status=SyncJobStatus.PENDING, updated_at=older_than)
+                    reset += 1
+        return reset
 
 
 def _words(text: str) -> set[str]:

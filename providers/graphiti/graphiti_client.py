@@ -2,6 +2,8 @@ import asyncio
 import hashlib
 from datetime import datetime, timezone
 
+from providers.graphiti.client import DEFAULT_TIMEOUT_SECONDS, driver_config
+
 EMBEDDING_DIM = 16
 
 
@@ -21,10 +23,16 @@ def _deterministic_embedding(text: str) -> list[float]:
     return [v / norm for v in raw]
 
 
-def _build_graphiti(uri: str, user: str, password: str):
+def _build_graphiti(uri: str, user: str, password: str, timeout: float = DEFAULT_TIMEOUT_SECONDS):
     """Construct a real graphiti_core.Graphiti instance — imported
     lazily so this module never requires graphiti-core/neo4j installed
     unless actually used.
+
+    graphiti-core's own Neo4jDriver builds its async neo4j driver with
+    library defaults (a minute of connection/retry waiting), so it is
+    given one built with Aftermind's fail-fast timeouts instead — an
+    unreachable Neo4j must surface as a quick failure the outbox can
+    record and retry, not a stalled observe().
 
     graphiti-core's edge resolution (deduplicating/contradicting a new
     fact against existing ones once there's more than one edge in a
@@ -40,8 +48,10 @@ def _build_graphiti(uri: str, user: str, password: str):
     try:
         from graphiti_core import Graphiti
         from graphiti_core.cross_encoder.client import CrossEncoderClient
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
         from graphiti_core.embedder.client import EmbedderClient
         from graphiti_core.llm_client import LLMConfig, OpenAIClient
+        from neo4j import AsyncGraphDatabase
     except ImportError as exc:
         raise ImportError(
             "GraphitiWriter requires the 'graphiti-core' and 'neo4j' packages: "
@@ -71,6 +81,13 @@ def _build_graphiti(uri: str, user: str, password: str):
         )
     )
 
+    graph_driver = Neo4jDriver(uri, user, password)
+    default_client = graph_driver.client
+    graph_driver.client = AsyncGraphDatabase.driver(uri, auth=(user or "", password or ""), **driver_config(timeout))
+    # The replaced default driver never opened a connection; closing it is
+    # awaited by the caller (see _add_fact_async) since this is sync code.
+    graph_driver._aftermind_replaced_client = default_client  # noqa: SLF001
+
     return Graphiti(
         uri,
         user,
@@ -78,6 +95,7 @@ def _build_graphiti(uri: str, user: str, password: str):
         llm_client=llm_client,
         embedder=_DeterministicEmbedder(),
         cross_encoder=_UnusedCrossEncoder(),
+        graph_driver=graph_driver,
     )
 
 
@@ -100,10 +118,11 @@ class GraphitiWriter:
     here; correctness under a sync facade does.
     """
 
-    def __init__(self, uri: str, user: str, password: str) -> None:
+    def __init__(self, uri: str, user: str, password: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
         self._uri = uri
         self._user = user
         self._password = password
+        self._timeout = timeout
 
     def add_fact(self, source: str, relation: str, target: str, group_id: str) -> None:
         asyncio.run(self._add_fact_async(source, relation, target, group_id))
@@ -112,7 +131,10 @@ class GraphitiWriter:
         from graphiti_core.edges import EntityEdge
         from graphiti_core.nodes import EntityNode
 
-        graphiti = _build_graphiti(self._uri, self._user, self._password)
+        graphiti = _build_graphiti(self._uri, self._user, self._password, timeout=self._timeout)
+        replaced = getattr(graphiti.driver, "_aftermind_replaced_client", None)
+        if replaced is not None:
+            await replaced.close()
         try:
             embedder = graphiti.embedder
             source_node = EntityNode(name=source, group_id=group_id, labels=["Entity"])

@@ -1,6 +1,22 @@
 from typing import Any, Optional
 
 DEFAULT_URI = "bolt://localhost:7687"
+# Bound how long a graph read/write can hang when Neo4j is unreachable.
+# The neo4j driver's defaults (60s connection acquisition, 30s
+# transaction retry) would otherwise stall observe()/recall() for a
+# minute before the outbox gets to record the failure and move on.
+DEFAULT_TIMEOUT_SECONDS = 5.0
+
+
+def driver_config(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, float]:
+    """neo4j.GraphDatabase.driver keyword config that makes an outage
+    fail fast (used by both the sync read client and graphiti's async
+    write driver so they behave the same)."""
+    return {
+        "connection_timeout": timeout,
+        "connection_acquisition_timeout": timeout,
+        "max_transaction_retry_time": timeout,
+    }
 
 
 class Neo4jClient:
@@ -22,6 +38,7 @@ class Neo4jClient:
         user: Optional[str] = None,
         password: Optional[str] = None,
         driver=None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         if driver is not None:
             self._driver = driver
@@ -31,7 +48,7 @@ class Neo4jClient:
             except ImportError as exc:
                 raise ImportError("Neo4jClient requires the 'neo4j' package: pip install neo4j") from exc
             auth = (user, password) if user else None
-            self._driver = GraphDatabase.driver(uri or DEFAULT_URI, auth=auth)
+            self._driver = GraphDatabase.driver(uri or DEFAULT_URI, auth=auth, **driver_config(timeout))
 
     def run(self, query: str, **params: Any) -> list:
         with self._driver.session() as session:
