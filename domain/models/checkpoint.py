@@ -9,18 +9,25 @@ from domain.models.scope import MemoryScope
 
 @dataclass(frozen=True)
 class Checkpoint:
-    """A saved point an agent's work can resume from later.
+    """A saved, versioned point an agent's work can resume from later.
 
-    Answers "where did I leave off?" — `summary` is the human/agent-
-    readable state of the work, `memory_ids` pins the memories that were
-    live/relevant at the time, `last_experience_id` points at the most
-    recent experience folded in. Recall planning (core/recall) starts
-    from the latest checkpoint for a scope, not from raw history.
+    Structured as goal/completed/current/blockers/next — the same shape
+    a human hands off a task with — rather than one free-text blob, so
+    recall can rebuild "where I left off" without re-reading raw history.
+    `memory_ids` pins the memories that were live/relevant at the time,
+    `last_experience_id` points at the most recent experience folded in.
     """
 
     checkpoint_id: str = field(default_factory=lambda: str(uuid4()))
     scope: Optional[MemoryScope] = None
-    summary: str = ""
+    version: int = 1
+
+    goal: str = ""
+    completed: tuple[str, ...] = field(default_factory=tuple)
+    current: str = ""
+    blockers: tuple[str, ...] = field(default_factory=tuple)
+    next_steps: tuple[str, ...] = field(default_factory=tuple)
+
     memory_ids: tuple[str, ...] = field(default_factory=tuple)
     last_experience_id: Optional[str] = None
     reason: str = ""  # what triggered this checkpoint, e.g. "task_completed"
@@ -28,5 +35,8 @@ class Checkpoint:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "completed", tuple(self.completed))
+        object.__setattr__(self, "blockers", tuple(self.blockers))
+        object.__setattr__(self, "next_steps", tuple(self.next_steps))
         object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

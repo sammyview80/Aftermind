@@ -26,9 +26,11 @@ def test_create_saves_and_returns_checkpoint():
     manager = CheckpointManager(store)
     scope = MemoryScope.of(tenant_id="t1")
 
-    checkpoint = manager.create(scope=scope, summary="Login flow implemented", memory_ids=["m1"], reason="task_completed")
+    checkpoint = manager.create(scope=scope, goal="Build login flow", current="wiring session handling", memory_ids=["m1"], reason="task_completed")
 
-    assert checkpoint.summary == "Login flow implemented"
+    assert checkpoint.goal == "Build login flow"
+    assert checkpoint.current == "wiring session handling"
+    assert checkpoint.version == 1
     assert manager.latest(scope) is checkpoint
 
 
@@ -37,14 +39,16 @@ def test_latest_returns_none_when_no_checkpoints():
     assert manager.latest(MemoryScope.of(tenant_id="t1")) is None
 
 
-def test_latest_returns_most_recent_for_scope():
+def test_create_increments_version_per_scope():
     store = FakeCheckpointStore()
     manager = CheckpointManager(store)
     scope = MemoryScope.of(tenant_id="t1")
 
-    manager.create(scope=scope, summary="first")
-    second = manager.create(scope=scope, summary="second")
+    first = manager.create(scope=scope, goal="first")
+    second = manager.create(scope=scope, goal="second")
 
+    assert first.version == 1
+    assert second.version == 2
     assert manager.latest(scope) is second
 
 
@@ -54,14 +58,20 @@ def test_checkpoint_experience_creates_checkpoint_on_task_completed():
     experience = Experience(
         experience_id="exp1",
         scope=scope,
-        events=[Event(event_type=EventType.TASK_COMPLETED)],
+        input="Build the login flow",
+        events=[
+            Event(event_type=EventType.USER_MESSAGE, payload={"text": "Build the login flow"}),
+            Event(event_type=EventType.TASK_COMPLETED, payload={"result": "tests passed"}),
+        ],
         output="Login flow implemented, tests passed",
     )
 
     checkpoint = manager.checkpoint_experience(experience, memory_ids=["m1"])
 
     assert checkpoint is not None
-    assert checkpoint.summary == "Login flow implemented, tests passed"
+    assert checkpoint.goal == "Build the login flow"
+    assert checkpoint.completed == ("tests passed",)
+    assert checkpoint.current == "Login flow implemented, tests passed"
     assert checkpoint.last_experience_id == "exp1"
     assert checkpoint.reason == "task_completed"
     assert checkpoint.memory_ids == ("m1",)
