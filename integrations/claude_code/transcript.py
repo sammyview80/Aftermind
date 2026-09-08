@@ -14,15 +14,40 @@ from pathlib import Path
 from typing import Optional
 
 
+_TEXT_BLOCK_TYPES = frozenset({"text", "input_text", "output_text"})
+# Injected/system content that shows up as a "user" message but isn't one:
+# hook context, tool results, Codex's AGENTS.md preamble and environment block.
+_NON_TURN_PREFIXES = ("<", "# AGENTS.md instructions")
+
+
 def _message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         return "\n".join(
-            block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") in _TEXT_BLOCK_TYPES
         ).strip()
     return ""
+
+
+def _role_and_message(entry: dict) -> tuple[str, dict] | None:
+    """Normalize one transcript line to (role, message) for both formats:
+    Claude Code (`type`: user|assistant, `message`: {...}) and Codex
+    rollouts (`type`: response_item, `payload`: {role, content})."""
+    message = entry.get("message")
+    if isinstance(message, dict) and entry.get("type") in ("user", "assistant"):
+        return entry["type"], message
+    payload = entry.get("payload")
+    if entry.get("type") == "response_item" and isinstance(payload, dict) and payload.get("role") in ("user", "assistant"):
+        return payload["role"], payload
+    return None
+
+
+def _is_turn_text(text: str) -> bool:
+    return bool(text) and not text.lstrip().startswith(_NON_TURN_PREFIXES)
 
 
 def count_exchanges(transcript_path: Optional[str], max_lines: int = 2000) -> int:
@@ -47,15 +72,16 @@ def count_exchanges(transcript_path: Optional[str], max_lines: int = 2000) -> in
             entry = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-        message = entry.get("message")
-        if not isinstance(message, dict):
+        normalized = _role_and_message(entry)
+        if normalized is None:
             continue
+        role, message = normalized
         text = _message_text(message)
-        if not text or text.lstrip().startswith("<"):
+        if not _is_turn_text(text):
             continue  # tool results / injected system context, not a turn
-        if entry.get("type") == "user":
+        if role == "user":
             awaiting_reply = True
-        elif entry.get("type") == "assistant" and awaiting_reply:
+        elif role == "assistant" and awaiting_reply:
             exchanges += 1
             awaiting_reply = False
     return exchanges
@@ -89,15 +115,18 @@ def read_last_exchange(transcript_path: Optional[str], max_lines: int = 200) -> 
         except (json.JSONDecodeError, ValueError):
             continue
 
-        entry_type = entry.get("type")
-        message = entry.get("message")
-        if not isinstance(message, dict):
+        normalized = _role_and_message(entry)
+        if normalized is None:
+            continue
+        role, message = normalized
+        text = _message_text(message)
+        if not _is_turn_text(text):
             continue
 
-        if entry_type == "assistant" and not last_assistant:
-            last_assistant = _message_text(message)
-        elif entry_type == "user" and not last_user:
-            last_user = _message_text(message)
+        if role == "assistant" and not last_assistant:
+            last_assistant = text
+        elif role == "user" and not last_user:
+            last_user = text
 
         if last_user and last_assistant:
             break

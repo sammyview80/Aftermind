@@ -1,0 +1,11 @@
+{
+  "_comment": "Written into ~/.codex/hooks.json by `aftermind connect codex` (timeouts are seconds; Codex caps SessionEnd at 3s, so that hook only spawns a detached checkpoint child). Replace /path/to/agent-memory if merging by hand. Also register the MCP server: codex mcp add aftermind --url http://127.0.0.1:8000/mcp/",
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 8 }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 8 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 10 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 10 }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 3 }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "cd /path/to/agent-memory && .venv/bin/python -m integrations.codex", "timeout": 20 }] }]
+  }
+}

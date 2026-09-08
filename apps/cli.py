@@ -1,5 +1,9 @@
 """`aftermind` command-line entry point.
 
+    aftermind up               one command: .env, Neo4j (docker), OpenKnowledge, SQLite, API
+    aftermind down             stop what `up` started
+    aftermind status           what is running / reachable
+    aftermind connect X        wire an agent: claude-code | codex | hermes | all
     aftermind serve            run the REST+MCP API (with in-process sync worker)
     aftermind worker           run only the outbox sync worker (separate process)
     aftermind sync status      show outbox backlog
@@ -14,6 +18,44 @@ import json
 import signal
 import sys
 import threading
+
+
+def _cmd_up(args: argparse.Namespace) -> int:
+    from apps.setup import stack
+
+    serve = "foreground" if args.foreground else args.serve
+    report = stack.up(serve=serve)
+    if serve == "foreground":
+        if not report.sqlite:
+            return 1
+        return _cmd_serve(argparse.Namespace(host=None, port=None))
+    return 0 if report.sqlite and report.server is not False else 1
+
+
+def _cmd_down(args: argparse.Namespace) -> int:
+    from apps.setup import stack
+
+    stack.down(stop_graph=not args.keep_neo4j)
+    return 0
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    from apps.setup import stack
+
+    print(json.dumps(stack.status(), indent=2))
+    return 0
+
+
+def _cmd_connect(args: argparse.Namespace) -> int:
+    from apps.setup import connectors, stack
+
+    targets = list(connectors.CONNECTORS) if args.agent == "all" else [args.agent]
+    root = stack.repo_root()
+    for target in targets:
+        print(f"== connect {target}", file=sys.stderr)
+        connectors.CONNECTORS[target](root, api_url=args.url)
+    print("Restart the agent(s) so they pick up the new hooks/MCP config.", file=sys.stderr)
+    return 0
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -114,6 +156,23 @@ def _cmd_config(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aftermind", description="Aftermind memory runtime")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up", help="bring up .env, Neo4j, OpenKnowledge, SQLite and the API")
+    up.add_argument("--serve", choices=["detach", "none"], default="detach", help="API: background (default) or skip")
+    up.add_argument("--foreground", action="store_true", help="run the API in this terminal")
+    up.set_defaults(func=_cmd_up)
+
+    down = sub.add_parser("down", help="stop the API, OpenKnowledge and the Neo4j container")
+    down.add_argument("--keep-neo4j", action="store_true")
+    down.set_defaults(func=_cmd_down)
+
+    status_cmd = sub.add_parser("status", help="show what is running")
+    status_cmd.set_defaults(func=_cmd_status)
+
+    connect = sub.add_parser("connect", help="wire an agent runtime to this Aftermind")
+    connect.add_argument("agent", choices=["claude-code", "codex", "hermes", "all"])
+    connect.add_argument("--url", default="http://127.0.0.1:8000", help="Aftermind API base URL")
+    connect.set_defaults(func=_cmd_connect)
 
     serve = sub.add_parser("serve", help="run the REST + MCP API")
     serve.add_argument("--host", default=None)

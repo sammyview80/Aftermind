@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aftermind Explorer</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand"><span class="dot"></span> Aftermind Explorer</div>
+    <div class="scope-picker">
+      <label class="muted" style="font-size:12px;">scope</label>
+      <select id="scope-select"><option value="">All scopes</option></select>
+    </div>
+  </header>
+  <nav id="nav">
+    <button data-view="overview" class="active"><span class="icon">◎</span> Overview</button>
+    <button data-view="ledger"><span class="icon">☰</span> Memory Ledger</button>
+    <button data-view="graph"><span class="icon">◈</span> Knowledge Graph</button>
+    <button data-view="docs"><span class="icon">▤</span> Knowledge</button>
+    <button data-view="sessions"><span class="icon">◷</span> Sessions</button>
+    <button data-view="trace"><span class="icon">⌕</span> Recall Trace</button>
+  </nav>
+  <main id="main"></main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

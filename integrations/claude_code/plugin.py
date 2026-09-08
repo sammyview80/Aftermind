@@ -18,6 +18,11 @@ Config (env vars, all optional):
     AFTERMIND_RECALL_LIMIT       max memories per recall (default 5)
     AFTERMIND_OBSERVE_TIMEOUT    seconds (default 10)
     AFTERMIND_CHECKPOINT_TIMEOUT seconds (default 15)
+    AFTERMIND_CHECKPOINT_MIN_EXCHANGES  real user/assistant exchanges a
+                                 session needs before SessionEnd/PreCompact
+                                 checkpoints it (default 2)
+
+Install: `aftermind connect claude-code` (see apps/setup/connectors.py).
 """
 import os
 import threading

@@ -101,3 +101,25 @@ def test_count_exchanges_counts_only_real_user_assistant_pairs(tmp_path):
     assert count_exchanges(str(transcript)) == 2
     assert count_exchanges(None) == 0
     assert count_exchanges(str(tmp_path / "missing.jsonl")) == 0
+
+
+def test_reads_codex_rollout_format_and_skips_agents_md_preamble(tmp_path):
+    from integrations.claude_code.transcript import count_exchanges
+
+    transcript = tmp_path / "rollout.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"type": "session_meta", "payload": {"cwd": "/x"}},
+            {
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>..."}]},
+            },
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "add tracing"}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Tracing added."}]}},
+            {"type": "event_msg", "payload": {"type": "token_count"}},
+        ],
+    )
+
+    assert read_last_exchange(str(transcript)) == "User: add tracing\nAssistant: Tracing added."
+    assert count_exchanges(str(transcript)) == 1

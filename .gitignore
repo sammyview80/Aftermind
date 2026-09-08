@@ -10,3 +10,4 @@ __pycache__/
 *.egg-info/
 openknowledge_store/
 build/
+.aftermind/

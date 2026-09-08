@@ -61,6 +61,8 @@ The excluded test hits a real LLM and is a known pre-existing flake against live
 
 Or `aftermind serve` / `aftermind worker` / `aftermind sync status` after `pip install -e .` (see `apps/cli.py`).
 
+One-command local stack: `./scripts/setup.sh` (venv + install + `aftermind up`). `aftermind up|down|status` live in `apps/setup/stack.py`; `aftermind connect claude-code|codex|hermes|all` in `apps/setup/connectors.py` (idempotent config merges, backups first). Codex hooks share Claude Code's stdin/stdout contract, so `integrations/codex/` reuses `integrations/claude_code/` handlers; `integrations/claude_code/transcript.py` parses both transcript formats.
+
 MCP is mounted at `/mcp/` (trailing slash matters — bare `/mcp` 307-redirects). REST endpoints: `/observe`, `/recall`, `/checkpoint`, `/checkpoint/latest`, `/checkpoint/from-text`, `/search`, `/consolidate`, `/maintenance/sweep`, `/maintenance/sync` (+ `/run`, `/retry`), `/traces`, `/traces/{id}`, `/config`, `/health` (liveness), `/health/ready` (readiness + sync backlog).
 
 ## Real infra used for verification (prefer real over fakes when available)
@@ -89,6 +91,7 @@ Deferred, not a bug: `user_correction` and `confirmed_decision` event types aren
 
 ## Git conventions (enforced, don't deviate)
 
+- `apps/setup/connectors.py` edits user config files (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.hermes/config.yaml`): keep every edit idempotent (replace our entries, never duplicate) and keep the backup-before-write.
 - Never commit unless explicitly asked ("commit it", "commit changes", etc.).
 - Run the full test suite before every commit.
 - No AI/Claude attribution in commit messages or PRs — no `Co-Authored-By: Claude ...` line.
