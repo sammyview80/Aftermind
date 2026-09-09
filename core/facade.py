@@ -13,7 +13,9 @@ from core.consolidation.triggers import (
     is_milestone_event,
 )
 from core.consolidation.validator import ConsolidationValidator
-from core.formation.candidate_extractor import CandidateExtractor
+from core.formation.admission import gate as admission_gate
+from core.formation.admission_llm import LLMAdmission, with_default_scores
+from core.formation.candidate_extractor import CandidateExtractor, strip_agent_framing
 from core.formation.evaluator import MemoryEvaluator
 from core.lifecycle.manager import LifecycleManager
 from core.observability import trace
@@ -38,6 +40,7 @@ from domain.interfaces.lifecycle_store import LifecycleStore
 from domain.interfaces.llm_provider import LLMProvider
 from domain.interfaces.sync_job_store import SyncJobStore
 from domain.interfaces.unit_of_work import UnitOfWork
+from domain.models.candidate import Candidate
 from domain.models.checkpoint import Checkpoint
 from domain.models.consolidation_result import ConsolidationResult
 from domain.models.experience import Experience
@@ -118,6 +121,9 @@ class AftermindService:
         sync_mode: str = EAGER,
         sync_max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         sync_eager_timeout: Optional[float] = DEFAULT_EAGER_TIMEOUT_SECONDS,
+        admission_mode: str = "rules",
+        memory_min_score: float = 0.5,
+        max_candidate_chars: int = 600,
         tracer: trace.Tracer = trace.default_tracer,
     ) -> None:
         self.knowledge_store = knowledge_store
@@ -130,8 +136,15 @@ class AftermindService:
 
         llm_provider = TracedLLMProvider(llm_provider)
 
+        if admission_mode not in ("rules", "llm"):
+            raise ValueError(f"admission_mode must be 'rules' or 'llm', got {admission_mode!r}")
+        self.admission_mode = admission_mode
+        self._max_candidate_chars = max_candidate_chars
         self._extractor = CandidateExtractor()
-        self._evaluator = MemoryEvaluator()
+        self._evaluator = MemoryEvaluator(threshold=memory_min_score)
+        self._llm_admission = LLMAdmission(
+            llm_provider, system_prompt=load_prompt("admission"), min_score=memory_min_score
+        )
         self._evidence_retriever = EvidenceRetriever(knowledge_store)
         self._reconciler = Reconciler(llm_provider)
         self._validator = Validator()
@@ -179,84 +192,137 @@ class AftermindService:
                 with trace.span("episode_store.save"):
                     self._episode_store.save(experience)
 
-            candidates = self._extractor.extract(experience)
+            candidates = self._admit(experience, t)
             t.record(candidate_count=len(candidates))
+
+            created: list[Memory] = []
+            for candidate in candidates:
+                memory = self._commit_candidate(candidate, experience, t)
+                if memory is not None:
+                    created.append(memory)
+
+            # Milestone events (task completed, handoff, ...) checkpoint even
+            # when nothing in the text was memory-worthy.
+            with trace.span("checkpoint"):
+                checkpoint = self._checkpoints.checkpoint_experience(experience, memory_ids=[m.memory_id for m in created])
+            t.record(checkpoint_created=checkpoint is not None)
+
             if not candidates:
                 return None
-
-            candidate = self._evaluator.evaluate(candidates[0])
-            if not self._evaluator.is_worth_remembering(candidate):
-                t.record(reconciliation_action="not_worth_remembering")
-                return None
-
-            with trace.span("evidence.retrieve"):
-                evidence = self._evidence_retriever.retrieve(candidate)
-            t.record(evidence_count=len(evidence))
-            with trace.span("reconcile"):
-                decision = self._reconciler.reconcile(candidate, evidence)
-            decision = self._validator.validate(decision, candidate, evidence)
-            t.record(reconciliation_action=decision.action.value)
-
-            is_milestone = any(is_milestone_event(e.event_type, DEFAULT_MILESTONE_TRIGGERS) for e in experience.events)
-            jobs: list[SyncJob] = []
-
-            # Everything below writes to the canonical store; one transaction
-            # (when a UnitOfWork is wired) so a crash can't leave a memory
-            # without its lifecycle row or its sync jobs — or vice versa.
-            with trace.span("sqlite.transaction"), self._transaction():
-                if self._decision_store is not None:
-                    self._decision_store.save(decision)
-
-                memory = self._reconciler.apply(decision, candidate, self.knowledge_store)
-
-                if memory is not None:
-                    t.record(sqlite_write=trace.OK, memory_id=memory.memory_id)
-                    self._lifecycle.get_or_create(memory)
-                    # If applying this decision superseded any evidence memory,
-                    # archive that memory's lifecycle record (content untouched),
-                    # and queue graph/document follow-ups for it.
-                    for evidence_memory in evidence:
-                        refreshed = self.knowledge_store.get(evidence_memory.memory_id)
-                        if refreshed is not None and refreshed.superseded_by:
-                            self._lifecycle.archive_superseded(refreshed)
-                            t.append("superseded_memory_ids", refreshed.memory_id)
-                            jobs.append(
-                                self.sync.enqueue(
-                                    SyncJobKind.GRAPH_MARK_STALE, {"memory_id": refreshed.memory_id}, memory.scope
-                                )
-                            )
-                            if self._document_store is not None:
-                                jobs.append(
-                                    self.sync.enqueue(
-                                        SyncJobKind.KNOWLEDGE_RECONSOLIDATE,
-                                        {"memory_id": refreshed.memory_id},
-                                        memory.scope,
-                                    )
-                                )
-                    jobs.append(self.sync.enqueue(SyncJobKind.GRAPH_SYNC, {"memory_id": memory.memory_id}, memory.scope))
-                    if self._document_store is not None:
-                        jobs.append(
-                            self.sync.enqueue(
-                                SyncJobKind.KNOWLEDGE_CONSOLIDATE,
-                                {"memory_id": memory.memory_id, "is_milestone": is_milestone},
-                                memory.scope,
-                            )
-                        )
-
-                checkpoint = self._checkpoints.checkpoint_experience(
-                    experience, memory_ids=[memory.memory_id] if memory else []
-                )
-                t.record(checkpoint_created=checkpoint is not None)
-
+            t.record(memory_ids=[m.memory_id for m in created])
             if self._document_store is None:
                 t.record(openknowledge_sync=trace.SKIPPED)
-            if memory is None:
+            if not created:
                 t.record(neo4j_sync=trace.SKIPPED)
                 return None
+            return created[0]
 
-            # Committed. Secondary stores are now best-effort + durable retry.
-            self.sync.flush(jobs)
-            return memory
+    # ------------------------------------------------------------ admission
+
+    def _admit(self, experience: Experience, t) -> list[Candidate]:
+        """What, if anything, in this experience may become memory.
+
+        1. Deterministic gate on the raw text (core/formation/admission.py):
+           questions, directives, greetings, narration, tool output, code,
+           markup and secrets never get further. Rejections are recorded as
+           `admission=rejected:<reason>` on the trace.
+        2. `llm` mode: one model call extracts atomic, third-person
+           statements with usefulness/durability; each is gated again and
+           held to the score bar. `rules` mode: the (framing-stripped) text
+           is the single candidate, scored by the rule-based evaluator.
+        Text the gate admits but flags as needing extraction (too long,
+        error reports) becomes memory only through the LLM path.
+        """
+        text = strip_agent_framing((experience.output or experience.input or "").strip())
+        event_types = [e.event_type for e in experience.events]
+        decision = admission_gate(text, event_types, max_chars=self._max_candidate_chars)
+        if not decision.admitted:
+            t.record(admission=f"rejected:{decision.reason}")
+            return []
+
+        if self.admission_mode == "llm":
+            with trace.span("admission.llm"):
+                candidates = self._llm_admission.extract(experience)
+            t.record(admission="llm", admission_proposals=len(candidates))
+            return candidates
+
+        if decision.needs_extraction:
+            t.record(admission="rejected:needs_llm_extraction")
+            return []
+
+        candidates = self._extractor.extract(experience)
+        admitted: list[Candidate] = []
+        for candidate in candidates:
+            scored = self._evaluator.evaluate(candidate)
+            if self._evaluator.is_worth_remembering(scored):
+                admitted.append(with_default_scores(scored))
+        t.record(admission="rules" if admitted else "rejected:score")
+        return admitted
+
+    def _commit_candidate(self, candidate: Candidate, experience: Experience, t) -> Optional[Memory]:
+        """Reconcile one admitted candidate against existing memory and
+        commit it (plus lifecycle, decision and sync jobs) in one
+        transaction; then flush the secondary-store jobs."""
+        with trace.span("evidence.retrieve"):
+            evidence = self._evidence_retriever.retrieve(candidate)
+        t.record(evidence_count=len(evidence))
+        with trace.span("reconcile"):
+            decision = self._reconciler.reconcile(candidate, evidence)
+        decision = self._validator.validate(decision, candidate, evidence)
+        t.record(reconciliation_action=decision.action.value)
+
+        is_milestone = any(is_milestone_event(e.event_type, DEFAULT_MILESTONE_TRIGGERS) for e in experience.events)
+        jobs: list[SyncJob] = []
+
+        # Everything below writes to the canonical store; one transaction
+        # (when a UnitOfWork is wired) so a crash can't leave a memory
+        # without its lifecycle row or its sync jobs — or vice versa.
+        with trace.span("sqlite.transaction"), self._transaction():
+            if self._decision_store is not None:
+                self._decision_store.save(decision)
+
+            memory = self._reconciler.apply(decision, candidate, self.knowledge_store)
+
+            if memory is not None:
+                t.record(sqlite_write=trace.OK, memory_id=memory.memory_id)
+                self._lifecycle.get_or_create(memory)
+                # If applying this decision superseded any evidence memory,
+                # archive that memory's lifecycle record (content untouched),
+                # and queue graph/document follow-ups for it.
+                for evidence_memory in evidence:
+                    refreshed = self.knowledge_store.get(evidence_memory.memory_id)
+                    if refreshed is not None and refreshed.superseded_by:
+                        self._lifecycle.archive_superseded(refreshed)
+                        t.append("superseded_memory_ids", refreshed.memory_id)
+                        jobs.append(
+                            self.sync.enqueue(
+                                SyncJobKind.GRAPH_MARK_STALE, {"memory_id": refreshed.memory_id}, memory.scope
+                            )
+                        )
+                        if self._document_store is not None:
+                            jobs.append(
+                                self.sync.enqueue(
+                                    SyncJobKind.KNOWLEDGE_RECONSOLIDATE,
+                                    {"memory_id": refreshed.memory_id},
+                                    memory.scope,
+                                )
+                            )
+                jobs.append(self.sync.enqueue(SyncJobKind.GRAPH_SYNC, {"memory_id": memory.memory_id}, memory.scope))
+                if self._document_store is not None:
+                    jobs.append(
+                        self.sync.enqueue(
+                            SyncJobKind.KNOWLEDGE_CONSOLIDATE,
+                            {"memory_id": memory.memory_id, "is_milestone": is_milestone},
+                            memory.scope,
+                        )
+                    )
+
+        if memory is None:
+            return None
+
+        # Committed. Secondary stores are now best-effort + durable retry.
+        self.sync.flush(jobs)
+        return memory
 
     # --------------------------------------------------------- sync handlers
 

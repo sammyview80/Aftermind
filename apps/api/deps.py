@@ -133,6 +133,9 @@ def get_service() -> AftermindService:
         sync_mode=settings.sync_mode,
         sync_max_attempts=settings.sync_max_attempts,
         sync_eager_timeout=settings.sync_eager_timeout_seconds,
+        admission_mode=settings.effective_admission_mode,
+        memory_min_score=settings.memory_min_score,
+        max_candidate_chars=settings.max_candidate_chars,
     )
 
 

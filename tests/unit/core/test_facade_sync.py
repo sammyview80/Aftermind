@@ -278,3 +278,63 @@ def test_recall_degrades_to_memories_only_when_the_graph_store_is_down():
     r = sink.recent(operation="recall")[0]
     assert r.status == trace.OK
     assert r.fields["graph_search"] == "failed"
+
+
+def test_observe_records_admission_rejections_and_still_checkpoints_milestones():
+    sink = trace.InMemoryTraceSink()
+    scope = MemoryScope.of(tenant_id="t1")
+    service = _service(ScriptedLLM(), tracer=trace.Tracer(sinks=[sink]))
+
+    assert service.observe(_experience("also commit and push", scope)) is None
+    assert sink.recent(operation="observe")[0].fields["admission"] == "rejected:directive"
+    assert service.observe(_experience('Tool Bash result: {"stdout": "ok"}', scope, EventType.TOOL_COMPLETED)) is None
+    assert sink.recent(operation="observe")[0].fields["admission"] == "rejected:tool_output"
+
+    # A milestone with nothing memory-worthy in its text still checkpoints.
+    assert service.observe(_experience("ok done", scope, EventType.TASK_COMPLETED)) is None
+    assert sink.recent(operation="observe")[0].fields["checkpoint_created"] is True
+
+
+def test_observe_llm_admission_mode_stores_each_extracted_fact():
+    class AdmittingLLM(ScriptedLLM):
+        def complete(self, prompt):
+            if "ADMISSION REVIEW" in prompt:
+                return json.dumps(
+                    [
+                        {"content": "The billing worker uses RabbitMQ.", "usefulness": 0.9, "durability": 0.9, "confidence": 0.9},
+                        {"content": "Billing retries failed messages three times.", "usefulness": 0.8, "durability": 0.8},
+                        {"content": "The deploy is running right now.", "usefulness": 0.9, "durability": 0.1},
+                    ]
+                )
+            return super().complete(prompt)
+
+    sink = trace.InMemoryTraceSink()
+    scope = MemoryScope.of(tenant_id="t1")
+    service = AftermindService(
+        knowledge_store=InMemoryKnowledgeStore(),
+        graph_store=InMemoryGraphStore(),
+        checkpoint_store=InMemoryCheckpointStore(),
+        lifecycle_store=InMemoryLifecycleStore(),
+        llm_provider=AdmittingLLM(),
+        admission_mode="llm",
+        tracer=trace.Tracer(sinks=[sink]),
+    )
+    long_text = "Codex here: after a long discussion " + "about the queue " * 40 + "we settled on RabbitMQ with three retries; deploy is running."
+
+    first = service.observe(_experience(long_text, scope))
+
+    t = sink.recent(operation="observe")[0].fields
+    assert first is not None
+    assert t["admission"] == "llm"
+    assert t["candidate_count"] == 2
+    assert len(t["memory_ids"]) == 2
+    stored = {m.content for m in service.knowledge_store.list_all(scope=scope)}
+    assert stored == {"The billing worker uses RabbitMQ.", "Billing retries failed messages three times."}
+
+
+def test_rules_mode_never_stores_overlong_text_verbatim():
+    sink = trace.InMemoryTraceSink()
+    scope = MemoryScope.of(tenant_id="t1")
+    service = _service(ScriptedLLM(), tracer=trace.Tracer(sinks=[sink]))
+    assert service.observe(_experience("We decided many things today. " * 40, scope)) is None
+    assert sink.recent(operation="observe")[0].fields["admission"] == "rejected:needs_llm_extraction"

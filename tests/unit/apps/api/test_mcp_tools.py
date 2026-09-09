@@ -36,7 +36,9 @@ def test_memory_observe_creates_and_returns_summary():
 
 def test_memory_observe_trivial_content_not_created():
     service = _service()
-    assert tools.memory_observe(service, scope={"tenant_id": "t1"}, output="okay thanks") == {"created": False}
+    result = tools.memory_observe(service, scope={"tenant_id": "t1"}, output="okay thanks")
+    assert result["created"] is False
+    assert result["admission"].startswith("rejected:")
 
 
 def test_memory_search_finds_observed_memory():

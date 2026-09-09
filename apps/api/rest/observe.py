@@ -35,7 +35,9 @@ class ObserveResponse(BaseModel):
     created: bool
     memory_id: Optional[str] = None
     content: Optional[str] = None
+    memory_ids: list[str] = []
     observe_id: str
+    admission: Optional[str] = None  # "llm" | "rules" | "rejected:<reason>"
     reconciliation_action: Optional[str] = None
     sync: ObserveSync
 
@@ -65,6 +67,7 @@ def observe(
         return ObserveResponse(
             created=False,
             observe_id=t.trace_id,
+            admission=t.fields.get("admission"),
             reconciliation_action=t.fields.get("reconciliation_action"),
             sync=sync,
         )
@@ -72,7 +75,9 @@ def observe(
         created=True,
         memory_id=memory.memory_id,
         content=memory.content,
+        memory_ids=list(t.fields.get("memory_ids", [memory.memory_id])),
         observe_id=t.trace_id,
+        admission=t.fields.get("admission"),
         reconciliation_action=t.fields.get("reconciliation_action"),
         sync=sync,
     )

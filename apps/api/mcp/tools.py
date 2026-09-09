@@ -36,10 +36,12 @@ def memory_observe(
     experience = Experience(
         scope=_scope(scope), events=[Event(event_type=EventType(event_type))], input=input, output=output
     )
-    memory = service.observe(experience)
+    with service.tracer.begin("observe", scope=experience.scope.key() if experience.scope else None) as t:
+        memory = service.observe(experience)
+    admission = t.fields.get("admission")
     if memory is None:
-        return {"created": False}
-    return {"created": True, **_summarize_memory(memory)}
+        return {"created": False, "admission": admission}
+    return {"created": True, "admission": admission, "memory_ids": list(t.fields.get("memory_ids", [])), **_summarize_memory(memory)}
 
 
 def memory_recall(

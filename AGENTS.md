@@ -40,6 +40,10 @@ cp .env.example .env           # fill in real values, never commit .env
 
 `providers/llm/factory.py` builds the provider from `LLM_PROVIDER`: `openai_compatible` (key + base URL), `codex_oauth` (Codex CLI's ChatGPT login via `chatgpt.com/backend-api/codex`), `claude_code_oauth` (Claude Code login via Anthropic Messages + OAuth betas). `providers/llm/credentials.py` discovers what exists on the machine (read-only); `apps/setup/llm_setup.py` is the interactive picker behind `aftermind init`. Refreshed OAuth tokens go to `~/.aftermind/credentials.json` (0600), never back into `~/.codex/auth.json` or `~/.claude` — those files belong to the CLIs and their refresh tokens rotate. Header/refresh contracts were taken from the Codex CLI and Hermes implementations; keep them in sync if either changes (ChatGPT accounts reject the public-API `-mini` slugs, use the live catalog).
 
+## Memory admission (what gets stored)
+
+`docs/memory-policy.md` is the contract. `core/formation/admission.py::gate()` is the deterministic authority and runs on every observation regardless of adapter; `core/formation/admission_llm.py` is the semantic stage (`AFTERMIND_ADMISSION_MODE`, default `auto` = LLM when configured). New junk class seen in `aftermind memory audit`? Add a gate rule *and* a case to `tests/unit/core/formation/test_admission.py`. Never widen the LLM stage to bypass the gate: its proposals are gated again on purpose.
+
 ## Reliability rules (SQLite canonical, outbox for the rest)
 
 - `core/facade.py::observe()` commits memory + lifecycle + decision + checkpoint + `sync_jobs` rows in one `UnitOfWork` transaction (`SqliteClient.transaction()`), then flushes the jobs through `core/sync/dispatcher.py`.

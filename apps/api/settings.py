@@ -59,6 +59,11 @@ class Settings:
     sync_stale_running_seconds: float = DEFAULT_STALE_RUNNING_SECONDS
     sync_eager_timeout_seconds: float = 15.0  # eager secondary write budget before observe() returns `pending`
 
+    # Memory admission: what may become a memory (docs/memory-policy.md)
+    admission_mode: str = "auto"  # auto (llm when an LLM is configured) | rules | llm
+    memory_min_score: float = 0.5
+    max_candidate_chars: int = 600
+
     # Observability
     log_level: str = "INFO"
     log_format: str = "text"  # text | json
@@ -92,6 +97,9 @@ class Settings:
                 env("AFTERMIND_SYNC_STALE_RUNNING_SECONDS", DEFAULT_STALE_RUNNING_SECONDS)
             ),
             sync_eager_timeout_seconds=float(env("AFTERMIND_SYNC_EAGER_TIMEOUT_SECONDS", 15.0)),
+            admission_mode=env("AFTERMIND_ADMISSION_MODE", "auto").strip().lower() or "auto",
+            memory_min_score=float(env("AFTERMIND_MEMORY_MIN_SCORE", 0.5)),
+            max_candidate_chars=int(env("AFTERMIND_MAX_CANDIDATE_CHARS", 600)),
             log_level=env("AFTERMIND_LOG_LEVEL", "INFO").upper(),
             log_format=env("AFTERMIND_LOG_FORMAT", "text").lower(),
             trace_buffer_size=int(env("AFTERMIND_TRACE_BUFFER", 200)),
@@ -108,12 +116,22 @@ class Settings:
             raise ValueError(f"LLM_PROVIDER must be one of {', '.join(PROVIDERS)}, got {self.llm_provider!r}")
         if self.sync_mode not in (EAGER, BACKGROUND):
             raise ValueError(f"AFTERMIND_SYNC_MODE must be '{EAGER}' or '{BACKGROUND}', got {self.sync_mode!r}")
+        if self.admission_mode not in ("auto", "rules", "llm"):
+            raise ValueError(f"AFTERMIND_ADMISSION_MODE must be auto, rules or llm, got {self.admission_mode!r}")
+        if not 0.0 <= self.memory_min_score <= 1.0:
+            raise ValueError("AFTERMIND_MEMORY_MIN_SCORE must be between 0 and 1")
         if self.log_format not in ("text", "json"):
             raise ValueError(f"AFTERMIND_LOG_FORMAT must be 'text' or 'json', got {self.log_format!r}")
         if self.sync_max_attempts < 1:
             raise ValueError("AFTERMIND_SYNC_MAX_ATTEMPTS must be >= 1")
         if self.sync_poll_seconds <= 0:
             raise ValueError("AFTERMIND_SYNC_POLL_SECONDS must be > 0")
+
+    @property
+    def effective_admission_mode(self) -> str:
+        if self.admission_mode == "auto":
+            return "llm" if self.llm_configured else "rules"
+        return self.admission_mode
 
     @property
     def llm_configured(self) -> bool:
@@ -138,6 +156,7 @@ class Settings:
             if f.name in _SECRET_FIELDS:
                 value = "***" if value else ""
             out[f.name] = value
+        out["effective_admission_mode"] = self.effective_admission_mode
         out["graph_backend"] = self.graph_backend
         out["document_backend"] = self.document_backend
         return out

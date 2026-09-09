@@ -10,6 +10,7 @@
     aftermind sync status      show outbox backlog
     aftermind sync run         drain due jobs once
     aftermind sync retry [ID]  requeue dead jobs (all, or one)
+    aftermind memory audit     which stored memories today's admission policy rejects (--purge to delete)
     aftermind backup DEST      consistent snapshot of the SQLite database
     aftermind check            integrity check of the SQLite database
     aftermind config           print effective configuration (secrets redacted)
@@ -149,6 +150,45 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    from apps.api.deps import get_settings, get_sqlite_client
+    from core.formation.admission import gate
+
+    settings = get_settings()
+    client = get_sqlite_client()
+    with client.connect() as conn:
+        rows = conn.execute(
+            "SELECT memory_id, scope_key, content, created_at FROM memories WHERE superseded_by IS NULL ORDER BY created_at"
+        ).fetchall()
+
+    rejected = []
+    for row in rows:
+        decision = gate(row["content"], max_chars=settings.max_candidate_chars)
+        if not decision.admitted:
+            rejected.append((row["memory_id"], row["scope_key"], decision.reason, row["content"]))
+
+    by_reason: dict[str, int] = {}
+    for _, _, reason, _ in rejected:
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    print(json.dumps({"memories": len(rows), "would_reject": len(rejected), "by_reason": by_reason}, indent=2))
+    if args.verbose or not args.purge:
+        for memory_id, scope_key, reason, content in rejected[: args.limit]:
+            preview = content.replace("\n", " ")[:90]
+            print(f"  {memory_id[:8]}  {reason:<17} {scope_key[:40]:<40} {preview}")
+
+    if not args.purge or not rejected:
+        return 0
+
+    backup = client.backup(f"{settings.database_path}.bak-audit-{__import__('time').strftime('%Y%m%d%H%M%S')}")
+    with client.transaction(), client.connect() as conn:
+        for memory_id, _, _, _ in rejected:
+            conn.execute("DELETE FROM sync_jobs WHERE payload LIKE ?", (f'%{memory_id}%',))
+            conn.execute("DELETE FROM lifecycle WHERE memory_id = ?", (memory_id,))
+            conn.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
+    print(json.dumps({"purged": len(rejected), "backup": backup}))
+    return 0
+
+
 def _cmd_backup(args: argparse.Namespace) -> int:
     from apps.api.deps import get_settings, get_sqlite_client
 
@@ -220,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
     retry = sync_sub.add_parser("retry")
     retry.add_argument("job_id", nargs="?", default=None)
     sync.set_defaults(func=_cmd_sync)
+
+    memory = sub.add_parser("memory", help="inspect stored memories against the admission policy")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    audit = memory_sub.add_parser("audit", help="list memories the current gate would reject")
+    audit.add_argument("--purge", action="store_true", help="delete them (after a DB backup)")
+    audit.add_argument("-v", "--verbose", action="store_true")
+    audit.add_argument("--limit", type=int, default=200)
+    memory.set_defaults(func=_cmd_memory)
 
     backup = sub.add_parser("backup", help="snapshot the SQLite database")
     backup.add_argument("destination")

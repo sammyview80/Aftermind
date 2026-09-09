@@ -10,75 +10,25 @@ _TRANSIENT_MARKERS = ("today", "right now", "currently just", "for now", "at the
 
 DEFAULT_WORTH_REMEMBERING_THRESHOLD = 0.5
 
-# A question is a request for a fact, not a fact. Stored as memory it
-# comes back as "Current facts: what database does Aftermind use" and
-# even reaches the graph as `Aftermind -[USES_DATABASE]-> unknown`.
-_INTERROGATIVE_STARTS = (
-    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
-    "is", "are", "am", "was", "were", "do", "does", "did", "can", "could",
-    "should", "would", "will", "shall", "may", "might", "have", "has", "had",
-    "isn't", "aren't", "don't", "doesn't", "didn't", "can't", "couldn't",
-    "shouldn't", "wouldn't", "won't",
+# The deterministic gate lives in core/formation/admission.py; these names
+# stay importable from here for existing callers and tests.
+from core.formation.admission import (  # noqa: E402
+    is_conversational_filler,
+    is_interrogative,
+    is_markup,
+    is_not_a_fact,
+    is_request,
 )
-_MIN_STATEMENT_WORDS = 3
 
-# A request to the agent ("also commit and push", "make it more layman",
-# "restart the server") is a task, not a fact about the world. Tasks belong
-# to checkpoints (goal / next steps), not to semantic memory — stored as
-# facts they come back as nonsense "Current facts" on the next turn.
-_REQUEST_LEADS = (
-    "also", "please", "pls", "okay", "ok", "now", "next", "then", "just", "let's", "lets",
-    "can you", "could you", "would you", "will you", "i want", "i need", "i'd like", "we need",
-    "make sure", "go ahead", "try to", "don't", "do not",
-)
-_IMPERATIVE_VERBS = frozenset(
-    """add build change check clean commit configure create debug delete deploy do document
-    ensure explain fix generate give help implement install investigate keep list look make
-    merge move open push read refactor remove rename restart run save search set show start
-    stop test try update upgrade use verify write""".split()
-)
-_MARKUP_START = ("<", "[", "{")
-
-
-def is_request(content: str) -> bool:
-    raw = content.strip()
-    text = raw.lower()
-    if not text:
-        return False
-    if text.startswith(_REQUEST_LEADS):
-        return True
-    # Bare-verb openers only count when written as typed chat ("restart the
-    # server", "commit and push"). A capitalized opener is far more often a
-    # subject noun that happens to be a verb too ("Search changed its index
-    # from X to Y") — a fact, not an order.
-    first = text.split(None, 1)[0].strip(",.:;!")
-    return first in _IMPERATIVE_VERBS and raw[0].islower()
-
-
-def is_markup(content: str) -> bool:
-    return content.lstrip().startswith(_MARKUP_START) and ">" in content or content.lstrip().startswith("{")
-
-
-def is_not_a_fact(content: str) -> bool:
-    """Deterministic gate applied before any score: questions, requests,
-    filler and machine markup never become memories."""
-    return is_interrogative(content) or is_request(content) or is_conversational_filler(content) or is_markup(content)
-
-
-def is_interrogative(content: str) -> bool:
-    text = content.strip()
-    if not text:
-        return False
-    if text.endswith("?"):
-        return True
-    first = text.split(None, 1)[0].lower().strip(",.:;")
-    return first in _INTERROGATIVE_STARTS
-
-
-def is_conversational_filler(content: str) -> bool:
-    """Too short to be a specific, durable statement ("ok", "i reloaded",
-    "thanks that works")."""
-    return len(content.split()) < _MIN_STATEMENT_WORDS
+__all__ = [
+    "MemoryEvaluator",
+    "LLMMemoryEvaluator",
+    "is_interrogative",
+    "is_request",
+    "is_conversational_filler",
+    "is_markup",
+    "is_not_a_fact",
+]
 
 
 class MemoryEvaluator:
