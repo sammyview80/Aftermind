@@ -35,15 +35,32 @@ class CheckpointManager:
         # stored and looked up under stabilized (execution-scope-stripped) scope.
         scope = scope.stable() if scope is not None else None
         previous = self._store.latest(scope)
+
+        # Fields omitted by the caller (empty string / empty iterable) carry
+        # forward from the previous checkpoint instead of wiping it out, so a
+        # partial manual update doesn't blank out unrelated fields the
+        # automatic summarizer path would have preserved.
+        completed = tuple(completed)
+        blockers = tuple(blockers)
+        next_steps = tuple(next_steps)
+        memory_ids = tuple(memory_ids)
+        if previous is not None:
+            goal = goal or previous.goal
+            current = current or previous.current
+            completed = completed or previous.completed
+            blockers = blockers or previous.blockers
+            next_steps = next_steps or previous.next_steps
+            memory_ids = memory_ids or previous.memory_ids
+
         checkpoint = Checkpoint(
             scope=scope,
             version=(previous.version + 1) if previous else 1,
             goal=goal,
-            completed=tuple(completed),
+            completed=completed,
             current=current,
-            blockers=tuple(blockers),
-            next_steps=tuple(next_steps),
-            memory_ids=tuple(memory_ids),
+            blockers=blockers,
+            next_steps=next_steps,
+            memory_ids=memory_ids,
             last_experience_id=last_experience_id,
             reason=reason,
             metadata=metadata or {},

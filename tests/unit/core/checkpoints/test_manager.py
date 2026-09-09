@@ -95,6 +95,45 @@ def test_checkpoint_experience_triggers_on_task_failed_and_handoff():
     assert manager.checkpoint_experience(handoff).reason == "agent_handoff"
 
 
+def test_create_merges_omitted_fields_from_previous_checkpoint():
+    store = FakeCheckpointStore()
+    manager = CheckpointManager(store)
+    scope = MemoryScope.of(tenant_id="t1")
+
+    manager.create(
+        scope=scope,
+        goal="Build login flow",
+        completed=["wired routes"],
+        current="writing tests",
+        blockers=["flaky CI"],
+        next_steps=["fix CI"],
+        memory_ids=["m1"],
+    )
+
+    updated = manager.create(scope=scope, current="tests passing")
+
+    assert updated.goal == "Build login flow"
+    assert updated.completed == ("wired routes",)
+    assert updated.current == "tests passing"
+    assert updated.blockers == ("flaky CI",)
+    assert updated.next_steps == ("fix CI",)
+    assert updated.memory_ids == ("m1",)
+    assert updated.version == 2
+
+
+def test_create_explicit_values_override_previous_checkpoint():
+    store = FakeCheckpointStore()
+    manager = CheckpointManager(store)
+    scope = MemoryScope.of(tenant_id="t1")
+
+    manager.create(scope=scope, goal="first", completed=["a"], blockers=["b"])
+    updated = manager.create(scope=scope, goal="second", completed=["c"], blockers=[])
+
+    assert updated.goal == "second"
+    assert updated.completed == ("c",)
+    assert updated.blockers == ("b",)
+
+
 def test_latest_finds_a_checkpoint_saved_under_a_different_session_id():
     """A checkpoint must outlive the session it was created in — that's
     the entire point of "continue where I left off" across a new
