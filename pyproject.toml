@@ -20,8 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 graph = ["graphiti-core>=0.30", "neo4j>=5"]
 mcp = ["mcp>=1.0"]
+semantic = ["sentence-transformers>=3"]
 dev = ["pytest>=8"]
-all = ["aftermind[graph,mcp]"]
+all = ["aftermind[graph,mcp,semantic]"]
 
 [project.scripts]
 aftermind = "apps.cli:main"

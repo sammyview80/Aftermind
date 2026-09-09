@@ -64,6 +64,16 @@ class Settings:
     memory_min_score: float = 0.5
     max_candidate_chars: int = 600
 
+    # Semantic recall: local sentence-transformers embedding index,
+    # companion to SQLite FTS5 keyword search. Off by default — it's an
+    # optional dependency (`pip install aftermind[semantic]`); enabling
+    # it without the package installed degrades gracefully (recall just
+    # skips the semantic candidates), so this is safe to flip on
+    # speculatively, but default-off avoids the (silent) first-request
+    # model download for installs that never opted in.
+    semantic_search_enabled: bool = False
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+
     # Observability
     log_level: str = "INFO"
     log_format: str = "text"  # text | json
@@ -100,6 +110,8 @@ class Settings:
             admission_mode=env("AFTERMIND_ADMISSION_MODE", "auto").strip().lower() or "auto",
             memory_min_score=float(env("AFTERMIND_MEMORY_MIN_SCORE", 0.5)),
             max_candidate_chars=int(env("AFTERMIND_MAX_CANDIDATE_CHARS", 600)),
+            semantic_search_enabled=_env_bool("AFTERMIND_SEMANTIC_SEARCH", False),
+            embedding_model=env("AFTERMIND_EMBEDDING_MODEL", cls.embedding_model),
             log_level=env("AFTERMIND_LOG_LEVEL", "INFO").upper(),
             log_format=env("AFTERMIND_LOG_FORMAT", "text").lower(),
             trace_buffer_size=int(env("AFTERMIND_TRACE_BUFFER", 200)),

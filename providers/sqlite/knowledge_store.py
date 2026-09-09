@@ -34,54 +34,61 @@ def _row_to_memory(row) -> Memory:
     )
 
 
+_STOPWORDS = frozenset(
+    {"the", "a", "an", "and", "or", "but", "for", "with", "this", "that", "from", "into", "onto",
+     "is", "are", "was", "were", "be", "to", "of", "on", "in", "at", "it", "as", "by", "we", "you"}
+)
+
+
 def _words(text: str) -> set[str]:
     return {w.strip(".,!?").lower() for w in text.split() if w.strip(".,!?")}
 
 
+def _fts_match_query(text: str) -> Optional[str]:
+    """Build an FTS5 MATCH expression from `text`'s meaningful words,
+    OR-joined so any overlapping term counts as a hit (bm25 still ranks
+    by how many/how rare) — each word is double-quoted as a literal
+    phrase token so punctuation/FTS5 operator characters in the source
+    text (hyphens, colons, asterisks) can't be interpreted as query
+    syntax. Returns None when there's nothing worth matching on."""
+    words = [w for w in _words(text) if w not in _STOPWORDS]
+    if not words:
+        return None
+    return " OR ".join('"' + w.replace('"', '""') + '"' for w in words)
+
+
 class SqliteKnowledgeStore:
-    """KnowledgeStore backed by SQLite — Aftermind's Phase 1 durable
-    memory store. `search` pulls candidates by scope from disk and ranks
-    by word overlap in Python (fine at this scale; swap for pgvector/
-    full-text search once volume warrants it)."""
+    """KnowledgeStore backed by SQLite — Aftermind's durable memory
+    store. `search`/`history` use FTS5 (BM25-ranked) full-text matching
+    over memory content rather than naive Python word-overlap scoring —
+    real keyword search, not just exact-vocabulary-match Jaccard."""
 
     def __init__(self, client: SqliteClient) -> None:
         self._client = client
 
-    def search(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
-        query_words = _words(query)
-
-        def overlap(memory: Memory) -> float:
-            memory_words = _words(memory.content)
-            if not query_words or not memory_words:
-                return 0.0
-            return len(query_words & memory_words) / len(query_words | memory_words)
-
+    def _fts_search(self, query: str, scope: Optional[MemoryScope], limit: int, live: bool) -> list[Memory]:
+        match = _fts_match_query(query)
+        if match is None:
+            return []
+        superseded_clause = "m.superseded_by IS NULL" if live else "m.superseded_by IS NOT NULL"
         with self._client.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM memories WHERE scope_key = ? AND superseded_by IS NULL", (scope_key(scope),)
+                f"""
+                SELECT m.* FROM memories m
+                JOIN memories_fts f ON f.rowid = m.rowid
+                WHERE m.scope_key = ? AND {superseded_clause} AND memories_fts MATCH ?
+                ORDER BY bm25(memories_fts)
+                LIMIT ?
+                """,
+                (scope_key(scope), match, limit),
             ).fetchall()
+        return [_row_to_memory(row) for row in rows]
 
-        candidates = [_row_to_memory(row) for row in rows]
-        ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
-        return ranked[:limit]
+    def search(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
+        return self._fts_search(query, scope, limit, live=True)
 
     def history(self, query: str, scope: Optional[MemoryScope] = None, limit: int = 5) -> list[Memory]:
-        query_words = _words(query)
-
-        def overlap(memory: Memory) -> float:
-            memory_words = _words(memory.content)
-            if not query_words or not memory_words:
-                return 0.0
-            return len(query_words & memory_words) / len(query_words | memory_words)
-
-        with self._client.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memories WHERE scope_key = ? AND superseded_by IS NOT NULL", (scope_key(scope),)
-            ).fetchall()
-
-        candidates = [_row_to_memory(row) for row in rows]
-        ranked = sorted((m for m in candidates if overlap(m) > 0), key=overlap, reverse=True)
-        return ranked[:limit]
+        return self._fts_search(query, scope, limit, live=False)
 
     def get(self, memory_id: str) -> Optional[Memory]:
         with self._client.connect() as conn:

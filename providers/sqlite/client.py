@@ -26,6 +26,36 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope_key);
 
+-- Full-text index over memory content (BM25-ranked keyword search,
+-- replacing naive Python word-overlap scoring). External-content table
+-- keyed by `memories.rowid` — kept in sync by the triggers below rather
+-- than duplicating content storage.
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='rowid');
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+-- Local embedding index for semantic recall (providers/embeddings,
+-- providers/sqlite/vector_store.py). Stored alongside SQLite rather
+-- than a separate vector DB — cosine similarity computed in Python at
+-- this scale; swap for sqlite-vec/an ANN index once volume warrants it.
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    memory_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(scope_key);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     scope_key TEXT NOT NULL,
@@ -177,6 +207,14 @@ class SqliteClient:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc):
                 raise
+
+        # One-time backfill: `memories_fts` only starts tracking rows via
+        # triggers going forward, so a database with pre-existing memories
+        # from before FTS existed needs its content indexed once.
+        fts_count = conn.execute("SELECT count(*) FROM memories_fts").fetchone()[0]
+        memory_count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        if fts_count == 0 and memory_count > 0:
+            conn.execute("INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories")
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=self._busy_timeout, isolation_level=None)

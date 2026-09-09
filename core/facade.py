@@ -34,6 +34,7 @@ from domain.enums.memory_status import MemoryStatus
 from domain.enums.sync_job_kind import SyncJobKind
 from domain.interfaces.checkpoint_store import CheckpointStore
 from domain.interfaces.decision_store import DecisionStore
+from domain.interfaces.embedder import Embedder
 from domain.interfaces.document_store import DocumentStore
 from domain.interfaces.episode_store import EpisodeStore
 from domain.interfaces.graph_store import GraphStore
@@ -44,6 +45,7 @@ from domain.interfaces.preference_evidence_store import PreferenceEvidenceStore
 from domain.interfaces.preference_store import PreferenceStore
 from domain.interfaces.sync_job_store import SyncJobStore
 from domain.interfaces.unit_of_work import UnitOfWork
+from domain.interfaces.vector_store import VectorStore
 from domain.models.candidate import Candidate
 from domain.models.checkpoint import Checkpoint
 from domain.models.consolidation_result import ConsolidationResult
@@ -119,6 +121,8 @@ class AftermindService:
         llm_provider: LLMProvider,
         preference_store: Optional[PreferenceStore] = None,
         preference_evidence_store: Optional[PreferenceEvidenceStore] = None,
+        embedder: Optional[Embedder] = None,
+        vector_store: Optional[VectorStore] = None,
         episode_store: Optional[EpisodeStore] = None,
         decision_store: Optional[DecisionStore] = None,
         document_store: Optional[DocumentStore] = None,
@@ -134,6 +138,8 @@ class AftermindService:
     ) -> None:
         self.knowledge_store = knowledge_store
         self.graph_store = graph_store
+        self._embedder = embedder
+        self._vector_store = vector_store if embedder is not None else None
         self._episode_store = episode_store
         self._decision_store = decision_store
         self._document_store = document_store
@@ -157,7 +163,7 @@ class AftermindService:
         self._triple_extractor = LLMTripleExtractor(llm_provider, system_prompt=load_prompt("triple_extractor"))
 
         self._recall_planner = RecallPlanner()
-        self._recall_retriever = Retriever(knowledge_store, graph_store)
+        self._recall_retriever = Retriever(knowledge_store, graph_store, self._embedder, self._vector_store)
         self._ranker = Ranker()
         self._context_builder = ContextBuilder()
 
@@ -350,7 +356,27 @@ class AftermindService:
 
         # Committed. Secondary stores are now best-effort + durable retry.
         self.sync.flush(jobs)
+        # Embedding runs *after* the transaction closes, same reasoning as
+        # graph/document sync: a slow or first-download-ever model load
+        # must never hold the SQLite write lock — it did, until this was
+        # moved out of the `with self._transaction()` block above, and
+        # blocked every other writer (including the background sync
+        # worker) for as long as the model took to load.
+        self._index_embedding(memory, t)
         return memory
+
+    def _index_embedding(self, memory: Memory, t) -> None:
+        """Best-effort semantic indexing — local (no retry queue needed
+        the way a network-dependent secondary store would need one),
+        but a broken/missing embedding model must never fail observe()
+        over something recall can just as well degrade without."""
+        if self._embedder is None or self._vector_store is None:
+            return
+        with trace.span("embedding.index", reraise=False) as span:
+            embedding = self._embedder.embed(memory.content)
+            self._vector_store.upsert(memory.memory_id, memory.scope, embedding, model=type(self._embedder).__name__)
+        if span is not None and span.status == trace.FAILED:
+            t.record(embedding_index=trace.FAILED)
 
     # --------------------------------------------------------- sync handlers
 

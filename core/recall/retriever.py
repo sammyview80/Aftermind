@@ -1,10 +1,20 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 from core.observability import trace
 from core.recall.planner import RecallPlan
+from domain.interfaces.embedder import Embedder
 from domain.interfaces.graph_store import GraphStore
 from domain.interfaces.knowledge_store import KnowledgeStore
+from domain.interfaces.vector_store import VectorStore
 from domain.models.memory import Memory
+
+
+# Below this cosine similarity, a semantic hit is noise, not signal —
+# generic sentence embeddings rarely score near 1.0 even for genuinely
+# related-but-differently-worded content, but unrelated content reliably
+# scores well below this.
+DEFAULT_MIN_SEMANTIC_SIMILARITY = 0.35
 
 
 @dataclass(frozen=True)
@@ -31,9 +41,17 @@ class Retriever:
     than returning nothing.
     """
 
-    def __init__(self, knowledge_store: KnowledgeStore, graph_store: GraphStore) -> None:
+    def __init__(
+        self,
+        knowledge_store: KnowledgeStore,
+        graph_store: GraphStore,
+        embedder: Optional[Embedder] = None,
+        vector_store: Optional[VectorStore] = None,
+    ) -> None:
         self._knowledge_store = knowledge_store
         self._graph_store = graph_store
+        self._embedder = embedder
+        self._vector_store = vector_store
 
     def retrieve(self, plan: RecallPlan) -> RetrievedEvidence:
         # Durable memories/entities are stored under stabilized scope
@@ -51,6 +69,21 @@ class Retriever:
                 for memory in self._knowledge_store.search(term, scope=scope, limit=plan.limit):
                     if (not plan.memory_types or memory.memory_type in plan.memory_types) and in_domain(memory):
                         by_id.setdefault(memory.memory_id, memory)
+
+        if self._embedder is not None and self._vector_store is not None:
+            with trace.span("semantic.retrieve", reraise=False) as span:
+                for term in plan.search_terms:
+                    query_embedding = self._embedder.embed(term)
+                    for memory_id, similarity in self._vector_store.search_similar(scope, query_embedding, plan.limit):
+                        if similarity < DEFAULT_MIN_SEMANTIC_SIMILARITY or memory_id in by_id:
+                            continue
+                        memory = self._knowledge_store.get(memory_id)
+                        if memory is None or memory.superseded_by:
+                            continue
+                        if (not plan.memory_types or memory.memory_type in plan.memory_types) and in_domain(memory):
+                            by_id.setdefault(memory.memory_id, memory)
+            if span is not None and span.status == trace.FAILED:
+                trace.record(semantic_search=trace.FAILED)
 
         entities: dict[str, None] = {}
         relationships: dict[tuple[str, str, str], None] = {}
