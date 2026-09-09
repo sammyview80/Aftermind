@@ -42,29 +42,33 @@ class Retriever:
         # run_id) still finds them.
         scope = plan.scope.stable() if plan.scope else None
 
+        def in_domain(memory: Memory) -> bool:
+            return not plan.domains or memory.memory_domain in plan.domains
+
         by_id: dict[str, Memory] = {}
         with trace.span("knowledge.search"):
             for term in plan.search_terms:
                 for memory in self._knowledge_store.search(term, scope=scope, limit=plan.limit):
-                    if not plan.memory_types or memory.memory_type in plan.memory_types:
+                    if (not plan.memory_types or memory.memory_type in plan.memory_types) and in_domain(memory):
                         by_id.setdefault(memory.memory_id, memory)
 
         entities: dict[str, None] = {}
         relationships: dict[tuple[str, str, str], None] = {}
-        with trace.span("graph.retrieve", reraise=False) as span:
-            for seed in plan.entity_seeds:
-                for related in self._graph_store.find_related(seed, scope=scope, limit=plan.limit):
-                    entities.setdefault(related, None)
-                for triple in self._graph_store.find_relationships(seed, scope=scope, limit=plan.limit):
-                    relationships.setdefault(tuple(triple), None)
-        if span is not None and span.status == trace.FAILED:
-            trace.record(graph_search=trace.FAILED)
+        if plan.include_graph:
+            with trace.span("graph.retrieve", reraise=False) as span:
+                for seed in plan.entity_seeds:
+                    for related in self._graph_store.find_related(seed, scope=scope, limit=plan.limit):
+                        entities.setdefault(related, None)
+                    for triple in self._graph_store.find_relationships(seed, scope=scope, limit=plan.limit):
+                        relationships.setdefault(tuple(triple), None)
+            if span is not None and span.status == trace.FAILED:
+                trace.record(graph_search=trace.FAILED)
 
         historical: dict[str, Memory] = {}
         with trace.span("knowledge.history"):
             for term in plan.search_terms:
                 for memory in self._knowledge_store.history(term, scope=scope, limit=plan.limit):
-                    if memory.memory_id not in by_id:
+                    if memory.memory_id not in by_id and in_domain(memory):
                         historical.setdefault(memory.memory_id, memory)
 
         return RetrievedEvidence(

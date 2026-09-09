@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+from core.recall.domain_router import DomainRouter
+from domain.enums.memory_domain import MemoryDomain
 from domain.enums.memory_type import MemoryType
 from domain.models.checkpoint import Checkpoint
 from domain.models.recall_query import RecallQuery
@@ -24,6 +26,10 @@ class RecallPlan:
     memory_types: tuple[MemoryType, ...]
     entity_seeds: tuple[str, ...]
     limit: int
+    domains: tuple[MemoryDomain, ...] = field(default_factory=tuple)
+    include_preferences: bool = True
+    include_graph: bool = True
+    include_knowledge: bool = True
 
 
 def _keywords(text: str, min_length: int = 4) -> list[str]:
@@ -45,11 +51,15 @@ class RecallPlanner:
     terms are drawn from it before the raw query text.
     """
 
+    def __init__(self, router: Optional[DomainRouter] = None) -> None:
+        self._router = router or DomainRouter()
+
     def plan(self, query: RecallQuery, checkpoint: Optional[Checkpoint]) -> RecallPlan:
+        routing = self._router.route(query, checkpoint)
         search_terms: list[str] = []
         entity_seeds: list[str] = []
 
-        if checkpoint is not None:
+        if checkpoint is not None and routing.include_checkpoint:
             for text in (checkpoint.goal, checkpoint.current, *checkpoint.blockers, *checkpoint.next_steps):
                 if text:
                     search_terms.append(text)
@@ -63,9 +73,13 @@ class RecallPlanner:
 
         return RecallPlan(
             scope=query.scope,
-            fetch_checkpoint=True,
+            fetch_checkpoint=routing.include_checkpoint,
             search_terms=tuple(dict.fromkeys(search_terms)),
             memory_types=tuple(memory_types),
             entity_seeds=tuple(dict.fromkeys(entity_seeds)),
             limit=query.limit,
+            domains=routing.domains,
+            include_preferences=routing.include_preferences,
+            include_graph=routing.include_graph,
+            include_knowledge=routing.include_knowledge,
         )

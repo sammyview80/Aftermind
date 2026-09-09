@@ -1,4 +1,5 @@
 from core.recall.planner import RecallPlanner
+from domain.enums.memory_domain import MemoryDomain
 from domain.enums.memory_type import MemoryType
 from domain.models.checkpoint import Checkpoint
 from domain.models.recall_query import RecallQuery
@@ -62,3 +63,29 @@ def test_plan_deduplicates_search_terms():
     plan = RecallPlanner().plan(query, checkpoint)
 
     assert plan.search_terms == ("Continue Aftermind",)
+
+
+def test_plan_routes_domains_for_an_organization_query():
+    query = RecallQuery(text="What does our company use for expense approval?")
+    plan = RecallPlanner().plan(query, checkpoint=None)
+
+    assert MemoryDomain.ORGANIZATION in plan.domains
+    assert plan.fetch_checkpoint is False
+
+
+def test_plan_omits_checkpoint_derived_terms_for_an_org_query_with_no_active_checkpoint():
+    query = RecallQuery(text="What does our company use for expense approval?")
+    plan = RecallPlanner().plan(query, checkpoint=None)
+
+    assert plan.fetch_checkpoint is False
+    assert plan.search_terms == ("What does our company use for expense approval?",)
+
+
+def test_plan_keeps_an_existing_checkpoint_even_for_an_off_topic_query():
+    checkpoint = Checkpoint(goal="Migrate billing workers")
+    query = RecallQuery(text="What does our company use for expense approval?")
+
+    plan = RecallPlanner().plan(query, checkpoint)
+
+    assert plan.fetch_checkpoint is True
+    assert "Migrate billing workers" in plan.search_terms

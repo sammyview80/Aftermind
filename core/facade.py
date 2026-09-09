@@ -477,10 +477,15 @@ class AftermindService:
 
             with trace.span("checkpoint.latest"):
                 checkpoint = self._checkpoints.latest(query.scope)
-            if checkpoint is not None:
-                t.append("recall_sources", "checkpoint")
 
             plan = self._recall_planner.plan(query, checkpoint)
+            # The domain router (core/recall/domain_router.py) decides whether
+            # this query is actually asking to continue prior work — an
+            # "our company's expense policy" question shouldn't drag the
+            # checkpoint into context just because one happens to exist.
+            checkpoint = checkpoint if plan.fetch_checkpoint else None
+            if checkpoint is not None:
+                t.append("recall_sources", "checkpoint")
             with trace.span("retrieve"):
                 evidence = self._recall_retriever.retrieve(plan)
             if evidence.memories:
@@ -512,7 +517,7 @@ class AftermindService:
                     self._lifecycle.record_access(memory.memory_id, scope=memory.scope)
 
             knowledge_excerpts: tuple[str, ...] = ()
-            if self._document_store is not None and query.text:
+            if self._document_store is not None and plan.include_knowledge and query.text:
                 # A down OpenKnowledge degrades recall (no excerpts) rather
                 # than failing it — SQLite memories are still returned.
                 with trace.span("document_store.search", reraise=False) as span:
@@ -527,7 +532,11 @@ class AftermindService:
                 elif knowledge_excerpts:
                     t.append("recall_sources", "openknowledge")
 
-            preferences = self._preferences.profile(query.scope) if self._preferences is not None else ()
+            preferences = (
+                self._preferences.profile(query.scope)
+                if self._preferences is not None and plan.include_preferences
+                else ()
+            )
             if preferences:
                 t.append("recall_sources", "preferences")
 

@@ -2,6 +2,7 @@ from typing import Optional
 
 from core.recall.planner import RecallPlan
 from core.recall.retriever import Retriever
+from domain.enums.memory_domain import MemoryDomain
 from domain.enums.memory_type import MemoryType
 from domain.models.memory import Memory
 from domain.models.scope import MemoryScope
@@ -107,6 +108,40 @@ def test_retrieve_collects_relationships_across_seeds():
     evidence = retriever.retrieve(plan)
 
     assert evidence.relationships == (("RabbitMQ", "part_of", "payments architecture"),)
+
+
+def test_retrieve_filters_by_memory_domain():
+    project_fact = Memory(content="ran tests", memory_domain=MemoryDomain.PROJECT)
+    org_fact = Memory(content="ran tests", memory_domain=MemoryDomain.ORGANIZATION)
+    store = FakeKnowledgeStore([project_fact, org_fact])
+    retriever = Retriever(store, FakeGraphStore({}))
+
+    plan = _plan(search_terms=("ran tests",), domains=(MemoryDomain.ORGANIZATION,))
+    evidence = retriever.retrieve(plan)
+
+    assert evidence.memories == (org_fact,)
+
+
+def test_retrieve_with_no_domains_set_returns_everything():
+    project_fact = Memory(content="ran tests", memory_domain=MemoryDomain.PROJECT)
+    org_fact = Memory(content="ran tests", memory_domain=MemoryDomain.ORGANIZATION)
+    store = FakeKnowledgeStore([project_fact, org_fact])
+    retriever = Retriever(store, FakeGraphStore({}))
+
+    plan = _plan(search_terms=("ran tests",))
+    evidence = retriever.retrieve(plan)
+
+    assert {m.memory_id for m in evidence.memories} == {project_fact.memory_id, org_fact.memory_id}
+
+
+def test_retrieve_skips_graph_when_not_included():
+    graph = FakeGraphStore({"login": ["auth_module"]})
+    retriever = Retriever(FakeKnowledgeStore([]), graph)
+
+    plan = _plan(entity_seeds=("login",), include_graph=False)
+    evidence = retriever.retrieve(plan)
+
+    assert evidence.related_entities == ()
 
 
 def test_retrieve_collects_historical_memories_excluding_live_ones():
