@@ -1,6 +1,8 @@
 from core.recall.context_builder import ContextBuilder
+from domain.enums.preference_source import PreferenceSource
 from domain.models.checkpoint import Checkpoint
 from domain.models.memory import Memory
+from domain.models.preference import Preference
 
 
 def test_build_includes_checkpoint_section():
@@ -78,6 +80,39 @@ def test_build_includes_knowledge_excerpts_section():
     assert "## From company knowledge" in context
     assert "### Billing Architecture" in context
     assert "Uses RabbitMQ." in context
+
+
+def test_build_includes_user_style_section_for_confident_preferences():
+    preferences = (
+        Preference(
+            dimension="response_style.verbosity",
+            value={"verbosity": "short"},
+            confidence=0.9,
+            source=PreferenceSource.EXPLICIT,
+        ),
+    )
+    context = ContextBuilder().build(None, [], (), preferences=preferences)
+
+    assert "## User style" in context
+    assert "Keep answers concise." in context
+
+
+def test_build_falls_back_to_generic_rendering_for_llm_shaped_preferences():
+    preferences = (
+        Preference(dimension="response_style.technical_depth", value={"value": "code_only"}, confidence=0.9),
+    )
+    context = ContextBuilder().build(None, [], (), preferences=preferences)
+
+    assert "## User style" in context
+    assert "technical depth" in context.lower()
+    assert "code_only" in context
+
+
+def test_build_omits_low_confidence_preferences():
+    preferences = (Preference(dimension="response_style.verbosity", value={"verbosity": "short"}, confidence=0.2),)
+    context = ContextBuilder().build(None, [], (), preferences=preferences)
+
+    assert "## User style" not in context
 
 
 def test_build_fuses_all_sources_into_one_compact_context():

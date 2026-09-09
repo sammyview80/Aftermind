@@ -19,6 +19,8 @@ from core.formation.candidate_extractor import CandidateExtractor, strip_agent_f
 from core.formation.evaluator import MemoryEvaluator
 from core.lifecycle.manager import LifecycleManager
 from core.observability import trace
+from core.preferences.manager import PreferenceManager
+from core.preferences.reconciler import LLMPreferenceReconciler
 from core.observability.llm import TracedLLMProvider
 from core.recall.context_builder import ContextBuilder
 from core.recall.planner import RecallPlanner
@@ -38,6 +40,8 @@ from domain.interfaces.graph_store import GraphStore
 from domain.interfaces.knowledge_store import KnowledgeStore
 from domain.interfaces.lifecycle_store import LifecycleStore
 from domain.interfaces.llm_provider import LLMProvider
+from domain.interfaces.preference_evidence_store import PreferenceEvidenceStore
+from domain.interfaces.preference_store import PreferenceStore
 from domain.interfaces.sync_job_store import SyncJobStore
 from domain.interfaces.unit_of_work import UnitOfWork
 from domain.models.candidate import Candidate
@@ -113,6 +117,8 @@ class AftermindService:
         checkpoint_store: CheckpointStore,
         lifecycle_store: LifecycleStore,
         llm_provider: LLMProvider,
+        preference_store: Optional[PreferenceStore] = None,
+        preference_evidence_store: Optional[PreferenceEvidenceStore] = None,
         episode_store: Optional[EpisodeStore] = None,
         decision_store: Optional[DecisionStore] = None,
         document_store: Optional[DocumentStore] = None,
@@ -157,6 +163,15 @@ class AftermindService:
 
         self._checkpoints = CheckpointManager(checkpoint_store)
         self._lifecycle = LifecycleManager(lifecycle_store)
+        self._preferences = (
+            PreferenceManager(
+                preference_store,
+                evidence_store=preference_evidence_store,
+                reconciler=LLMPreferenceReconciler(llm_provider, system_prompt=load_prompt("preference_reconciler")),
+            )
+            if preference_store is not None
+            else None
+        )
         self._checkpoint_summarizer = LLMCheckpointSummarizer(llm_provider, system_prompt=load_prompt("checkpoint"))
 
         self._consolidator = LLMConsolidator(llm_provider, system_prompt=load_prompt("consolidator"))
@@ -192,6 +207,10 @@ class AftermindService:
                 with trace.span("episode_store.save"):
                     self._episode_store.save(experience)
 
+            if self._preferences is not None:
+                with trace.span("preferences.observe"):
+                    self._observe_preference_signals(experience)
+
             candidates = self._admit(experience, t)
             t.record(candidate_count=len(candidates))
 
@@ -216,6 +235,15 @@ class AftermindService:
                 t.record(neo4j_sync=trace.SKIPPED)
                 return None
             return created[0]
+
+    def _observe_preference_signals(self, experience: Experience) -> None:
+        """Behavior/preference learning is a side-channel to fact
+        formation, not a fact itself — it runs against the user's own
+        turn (`input`), independent of whether anything in it was
+        admitted as memory. Heuristic hits apply immediately; everything
+        else joins an evidence buffer the LLM reconciler periodically
+        reads for subtler patterns (see `PreferenceManager.observe_text`)."""
+        self._preferences.observe_text(experience.scope, experience.input or "")
 
     # ------------------------------------------------------------ admission
 
@@ -499,6 +527,10 @@ class AftermindService:
                 elif knowledge_excerpts:
                     t.append("recall_sources", "openknowledge")
 
+            preferences = self._preferences.profile(query.scope) if self._preferences is not None else ()
+            if preferences:
+                t.append("recall_sources", "preferences")
+
             context = self._context_builder.build(
                 checkpoint,
                 ranked,
@@ -506,6 +538,7 @@ class AftermindService:
                 relationships=evidence.relationships,
                 historical_memories=evidence.historical_memories,
                 knowledge_excerpts=knowledge_excerpts,
+                preferences=preferences,
             )
             t.record(
                 retrieved_count=len(evidence.memories),

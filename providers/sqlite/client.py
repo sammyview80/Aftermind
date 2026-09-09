@@ -102,6 +102,31 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_due ON sync_jobs(status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS preferences (
+    preference_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    scope_levels TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    value TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence_count INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    superseded_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_preferences_scope_dimension ON preferences(scope_key, dimension);
+
+CREATE TABLE IF NOT EXISTS preference_evidence (
+    evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL,
+    scope_levels TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_preference_evidence_scope ON preference_evidence(scope_key, evidence_id);
 """
 
 

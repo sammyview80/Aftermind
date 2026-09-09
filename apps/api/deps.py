@@ -14,6 +14,8 @@ from providers.sqlite.decision_store import SqliteDecisionStore
 from providers.sqlite.episode_store import SqliteEpisodeStore
 from providers.sqlite.knowledge_store import SqliteKnowledgeStore
 from providers.sqlite.lifecycle_store import SqliteLifecycleStore
+from providers.sqlite.preference_evidence_store import SqlitePreferenceEvidenceStore
+from providers.sqlite.preference_store import SqlitePreferenceStore
 from providers.sqlite.sync_job_store import SqliteSyncJobStore
 
 _LOG = logging.getLogger("aftermind.api")
@@ -125,6 +127,8 @@ def get_service() -> AftermindService:
         checkpoint_store=SqliteCheckpointStore(client),
         lifecycle_store=SqliteLifecycleStore(client),
         llm_provider=_LazyLLMProvider(),
+        preference_store=SqlitePreferenceStore(client),
+        preference_evidence_store=SqlitePreferenceEvidenceStore(client),
         episode_store=SqliteEpisodeStore(client),
         decision_store=SqliteDecisionStore(client),
         document_store=get_document_store(),
