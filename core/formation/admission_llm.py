@@ -13,6 +13,7 @@ import logging
 from dataclasses import replace
 
 from core.formation.admission import gate, redact_secrets
+from core.formation.domain_classifier import classify_domain
 from core.json_utils import parse_json_response
 from domain.enums.memory_type import MemoryType
 from domain.interfaces.llm_provider import LLMProvider
@@ -99,6 +100,7 @@ class LLMAdmission:
                     scope=experience.scope,
                     content=content,
                     memory_type=memory_type,
+                    memory_domain=classify_domain(content),
                     entities=tuple(str(e) for e in proposal.get("entities", ()) if e),
                     relationships=tuple(str(r) for r in proposal.get("relationships", ()) if r),
                     confidence=confidence,

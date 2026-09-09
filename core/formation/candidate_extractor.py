@@ -1,5 +1,6 @@
 import re
 
+from core.formation.domain_classifier import classify_domain
 from core.json_utils import parse_json_response
 from domain.enums.memory_type import MemoryType
 from domain.interfaces.llm_provider import LLMProvider
@@ -70,6 +71,7 @@ class CandidateExtractor:
                 experience_id=experience.experience_id,
                 scope=experience.scope,
                 content=text,
+                memory_domain=classify_domain(text),
                 source_event_ids=tuple(event.event_id for event in experience.events),
             )
         ]
@@ -117,6 +119,7 @@ class LLMCandidateExtractor:
                 scope=experience.scope,
                 content=proposal["content"],
                 memory_type=MemoryType(proposal.get("memory_type", MemoryType.SEMANTIC.value)),
+                memory_domain=classify_domain(proposal["content"]),
                 entities=tuple(proposal.get("entities", ())),
                 relationships=tuple(proposal.get("relationships", ())),
                 confidence=float(proposal.get("confidence", 0.0)),

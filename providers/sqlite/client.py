@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS memories (
     scope_levels TEXT NOT NULL,
     content TEXT NOT NULL,
     memory_type TEXT NOT NULL,
+    memory_domain TEXT NOT NULL DEFAULT 'project',
     entities TEXT NOT NULL,
     relationships TEXT NOT NULL,
     confidence REAL NOT NULL,
@@ -162,8 +163,20 @@ class SqliteClient:
             if path != ":memory:":
                 setup.execute("PRAGMA journal_mode=WAL")
             setup.executescript(_SCHEMA)
+            self._migrate(setup)
         finally:
             setup.close()
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Additive schema changes for databases created before a column
+        existed. `CREATE TABLE IF NOT EXISTS` in `_SCHEMA` only handles
+        brand-new tables — an existing `memories` table from before
+        `memory_domain` was added needs this to pick the column up."""
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN memory_domain TEXT NOT NULL DEFAULT 'project'")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=self._busy_timeout, isolation_level=None)

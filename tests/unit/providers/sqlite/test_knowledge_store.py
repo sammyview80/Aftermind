@@ -1,3 +1,4 @@
+from domain.enums.memory_domain import MemoryDomain
 from domain.models.memory import Memory
 from domain.models.scope import MemoryScope
 from providers.sqlite.client import SqliteClient
@@ -14,6 +15,15 @@ def test_save_then_get_round_trips(tmp_path):
     assert fetched.content == "Team uses PostgreSQL"
     assert fetched.entities == ("team", "postgresql")
     assert fetched.scope.get("tenant_id") == "t1"
+    assert fetched.memory_domain == MemoryDomain.PROJECT
+
+
+def test_save_then_get_round_trips_a_non_default_memory_domain(tmp_path):
+    store = SqliteKnowledgeStore(SqliteClient(str(tmp_path / "test.db")))
+    scope = MemoryScope.of(tenant_id="t1")
+    memory = store.save(Memory(scope=scope, content="Current blocker is a failing build", memory_domain=MemoryDomain.SESSION))
+
+    assert store.get(memory.memory_id).memory_domain == MemoryDomain.SESSION
 
 
 def test_search_excludes_superseded_and_scopes_correctly(tmp_path):

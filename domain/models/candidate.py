@@ -4,6 +4,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
+from domain.enums.memory_domain import MemoryDomain
 from domain.enums.memory_type import MemoryType
 from domain.models.scope import MemoryScope
 
@@ -27,6 +28,7 @@ class Candidate:
     scope: Optional[MemoryScope] = None
     content: str = ""
     memory_type: MemoryType = MemoryType.SEMANTIC
+    memory_domain: MemoryDomain = MemoryDomain.PROJECT
 
     entities: tuple[str, ...] = field(default_factory=tuple)
     relationships: tuple[str, ...] = field(default_factory=tuple)

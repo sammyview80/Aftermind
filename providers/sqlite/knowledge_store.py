@@ -1,5 +1,6 @@
 from typing import Optional
 
+from domain.enums.memory_domain import MemoryDomain
 from domain.enums.memory_type import MemoryType
 from domain.models.memory import Memory
 from domain.models.scope import MemoryScope
@@ -20,6 +21,7 @@ def _row_to_memory(row) -> Memory:
         scope=load_scope(row["scope_levels"]),
         content=row["content"],
         memory_type=MemoryType(row["memory_type"]),
+        memory_domain=MemoryDomain(row["memory_domain"]),
         entities=tuple(load_json(row["entities"])),
         relationships=tuple(load_json(row["relationships"])),
         confidence=row["confidence"],
@@ -99,13 +101,14 @@ class SqliteKnowledgeStore:
             conn.execute(
                 """
                 INSERT INTO memories (
-                    memory_id, scope_key, scope_levels, content, memory_type, entities,
+                    memory_id, scope_key, scope_levels, content, memory_type, memory_domain, entities,
                     relationships, confidence, version, superseded_by, source_candidate_ids,
                     metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     scope_key=excluded.scope_key, scope_levels=excluded.scope_levels,
                     content=excluded.content, memory_type=excluded.memory_type,
+                    memory_domain=excluded.memory_domain,
                     entities=excluded.entities, relationships=excluded.relationships,
                     confidence=excluded.confidence, version=excluded.version,
                     superseded_by=excluded.superseded_by,
@@ -118,6 +121,7 @@ class SqliteKnowledgeStore:
                     dump_scope_levels(memory.scope),
                     memory.content,
                     memory.memory_type.value,
+                    memory.memory_domain.value,
                     dump_json(list(memory.entities)),
                     dump_json(list(memory.relationships)),
                     memory.confidence,
